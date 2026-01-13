@@ -1,19 +1,11 @@
-extern crate alloc;
 use esp_hal::peripherals::FLASH;
 use static_cell::StaticCell;
-use alloc::string::String;
-use serde::{Serialize, Deserialize};
 use esp_storage::FlashStorage;
 use embedded_storage::nor_flash::NorFlash;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embedded_storage::nor_flash::ReadNorFlash;
 use embassy_sync::mutex::Mutex;
-
-#[derive(Deserialize, Serialize)]
-pub struct WifiSsidPwd {
-    pub ssid: String,
-    pub pwd: String,
-}
+use crate::types::WifiSsidPwd;
 
 pub struct StaConfigManager<'d> {
     flash: FlashStorage<'d>,
