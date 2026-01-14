@@ -25,9 +25,9 @@ embedded-sdmmc = "0.9.0"
 embedded-hal-bus = "0.3.0"
 embedded-hal = "1.0.0"
 embedded-storage = "0.3.1"
-esp-radio = { version = "0.17.0", features = ["esp32", "wifi", "esp-alloc", "log-04"] }
+esp-radio = { version = "0.17.0", features = ["esp32", "wifi", "esp-alloc", "log-04", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["log-04", "esp32", "embassy", "esp-radio", "esp-alloc"] }
-embassy-net = { version = "0.7.1", features = ["tcp", "dhcpv4", "log"] }
+embassy-net = { version = "0.7.1", features = ["tcp", "dhcpv4", "log", "icmp"] }
 embassy-executor = { version = "0.9.1", features = [] }
 embassy-time = { version = "0.5.0" }
 embassy-sync = { version = "0.7.2" }

@@ -5,17 +5,16 @@ use embassy_time::Duration;
 use embassy_net::tcp::TcpSocket;
 use crate::router;
 
-#[embassy_executor::task(pool_size = 2)]
+#[embassy_executor::task(pool_size = 4)]
 pub async fn http_server_task(
     stack: Stack<'static>,
     static_resources: &'static StaticCell<([u8; 1024], [u8; 1024], [u8; 2048])>
 ) {
     let (rx_buf, tx_buf, http_buf) = static_resources.init(([0; 1024], [0; 1024], [0; 2048]));
-
     let app = router::router();
     let config = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: Some(Duration::from_secs(5)),
-        persistent_start_read_request: Some(Duration::from_secs(1)),
+        persistent_start_read_request: None,
         read_request: Some(Duration::from_secs(1)),
         write: Some(Duration::from_secs(1)),
     });
