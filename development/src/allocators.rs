@@ -2,6 +2,7 @@ use allocator_api2::alloc::{Allocator, AllocError, Layout};
 use std::ptr::NonNull;
 use buddy_system_allocator::LockedHeap;
 
+#[derive(Clone)]
 pub struct SimAllocator<const ORDER: usize>(pub &'static LockedHeap<ORDER>);
 
 unsafe impl <const ORDER: usize> Allocator for SimAllocator<ORDER> {
@@ -17,7 +18,9 @@ unsafe impl <const ORDER: usize> Allocator for SimAllocator<ORDER> {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        self.0.lock().dealloc(ptr, layout);
+        unsafe {
+            self.0.lock().dealloc(ptr, layout);
+        }
     }
 }
 

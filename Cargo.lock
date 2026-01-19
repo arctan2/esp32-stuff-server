@@ -265,6 +265,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "db_engine"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+ "embedded-sdmmc",
+ "serde",
+]
+
+[[package]]
 name = "delegate"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -281,6 +290,7 @@ version = "0.1.0"
 dependencies = [
  "allocator-api2",
  "buddy_system_allocator",
+ "db_engine",
  "embassy-sync 0.7.2",
  "embassy-time 0.5.0",
  "embedded-sdmmc",

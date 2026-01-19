@@ -32,7 +32,7 @@ impl BlockDevice for RamBlockDevice {
         blocks: &mut [Block],
         start_block_idx: BlockIdx,
     ) -> Result<(), Self::Error> {
-        let mut buf = SD_BUF.lock().unwrap();
+        let buf = SD_BUF.lock().unwrap();
 
         for (i, blk) in blocks.iter_mut().enumerate() {
             let idx = BlockIdx(start_block_idx.0 + i as u32);
