@@ -21,20 +21,18 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
         }
     }
 
-    pub unsafe fn read_mut_ref<T>(&mut self, offset: usize) -> T {
-        unsafe {
-            let size = core::mem::size_of::<T>();
-            let ptr = self.0[offset..offset + size].as_mut_ptr() as *mut T;
-            &mut *ptr
-        }
-    }
-
     pub unsafe fn read<T>(&mut self, offset: usize) -> T {
         unsafe {
             let size = core::mem::size_of::<T>();
             let src_slice = &self.0[offset..offset + size];
             core::ptr::read_unaligned(src_slice.as_ptr() as *const T)
         }
+    }
+
+    pub unsafe fn as_ptr_mut<T>(&mut self, offset: usize) -> *mut T {
+        let size = core::mem::size_of::<T>();
+        let ptr = self.0[offset..offset + size].as_mut_ptr() as *mut T;
+        ptr
     }
 }
 

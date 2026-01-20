@@ -1,5 +1,4 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
-use allocator_api2::boxed::Box;
 use allocator_api2::alloc::Allocator;
 use crate::PageRW;
 use crate::types::PageBuffer;
@@ -19,10 +18,11 @@ pub const MAGIC: [u8; 8] = *b"_stufff_";
 
 #[derive(Debug)]
 #[repr(packed)]
+#[allow(unused)]
 pub struct DBHeader {
     magic: [u8; 8],
     page_count: u32,
-    free_list_page: u32,
+    free_list_head_page: u32,
 }
 
 impl Default for DBHeader {
@@ -30,14 +30,16 @@ impl Default for DBHeader {
         Self {
             magic: MAGIC,
             page_count: 0,
-            free_list_page: 0,
+            free_list_head_page: 0,
         }
     }
 }
 
 #[derive(Debug)]
 pub enum Error<E: core::fmt::Debug> {
-    SdmmcErr(embedded_sdmmc::Error<E>)
+    SdmmcErr(embedded_sdmmc::Error<E>),
+    FreeListNotFound,
+    HeaderNotFound
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
@@ -74,21 +76,47 @@ where
         };
     }
 
-    fn get_free_list(self) -> &mut PageFreeList {
+    fn get_free_list_ptr(&mut self) -> Result<*mut PageFreeList, Error<D::Error>> {
+        match &self.header {
+            Some(header) => {
+                if header.free_list_head_page != 1 {
+                    return Err(Error::FreeListNotFound);
+                }
+                self.page_rw.read_page(1, self.buf.as_mut())?;
+                unsafe {
+                    let free_list_head: *mut PageFreeList = self.buf.as_ptr_mut(0);
+                    return Ok(free_list_head);
+                }
+            },
+            None => Err(Error::HeaderNotFound)
+        }
     }
 
     pub fn init(&mut self) -> Result<(), Error<D::Error>> {
-        let mut header = self.get_or_create_header()?;
+        self.header = Some(self.get_or_create_header()?);
 
-        if header.page_count == 0 {
-            header.page_count = 2;
-            self.page_rw.extend_file_by_pages(1, self.buf.as_mut());
-            println!("{}", self.page_rw.file.length());
+        match &mut self.header {
+            Some(header) => {
+                if header.page_count == 0 {
+                    header.page_count = 2;
+                    header.free_list_head_page = 1;
+                    unsafe {
+                        self.buf.write(0, &header);
+                        let _ = self.page_rw.write_page(0, self.buf.as_ref());
+                    }
+                    let _ = self.page_rw.extend_file_by_pages(1, self.buf.as_mut());
+                }
+
+                unsafe {
+                    for _ in 0..10 {
+                        let free_page_num = PageFreeList::get_free_page(self.buf.as_mut(), &self.page_rw)?;
+                        let _ = PageFreeList::add_to_list(self.buf.as_mut(), free_page_num, &self.page_rw)?;
+                    }
+                }
+            },
+            None => return Err(Error::HeaderNotFound)
         }
 
-        println!("free_page = {}", self.free_list.get_free_page(&self.page_rw));
-
-        self.header = Some(header);
         Ok(())
     }
 }

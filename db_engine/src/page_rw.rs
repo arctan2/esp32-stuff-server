@@ -44,14 +44,13 @@ where
         return self.file.write(buf);
     }
 
-    pub fn extend_file_by_pages(&self, count: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<(), Error<D::Error>> {
+    pub fn extend_file_by_pages(&self, count: u32, buf: &mut [u8; PAGE_SIZE]) -> Result<u32, Error<D::Error>> {
         let cur_page_count = self.file.length() / (PAGE_SIZE as u32);
         buf.fill(0);
         for i in 0..count {
             self.write_page(cur_page_count + i, buf)?;
         }
-
-        Ok(())
+        Ok(cur_page_count)
     }
 }
 
