@@ -11,7 +11,6 @@ where
 {
     page_rw: PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     buf: PageBuffer<A>,
-    header: Option<DBHeader>,
 }
 
 pub const MAGIC: [u8; 8] = *b"_stufff_";
@@ -58,7 +57,6 @@ where
         return Self {
             page_rw: PageRW::new(file),
             buf: PageBuffer::new(allocator),
-            header: None,
         };
     }
 
@@ -76,47 +74,30 @@ where
         };
     }
 
-    fn get_free_list_ptr(&mut self) -> Result<*mut PageFreeList, Error<D::Error>> {
-        match &self.header {
-            Some(header) => {
-                if header.free_list_head_page != 1 {
-                    return Err(Error::FreeListNotFound);
-                }
-                self.page_rw.read_page(1, self.buf.as_mut())?;
-                unsafe {
-                    let free_list_head: *mut PageFreeList = self.buf.as_ptr_mut(0);
-                    return Ok(free_list_head);
-                }
-            },
-            None => Err(Error::HeaderNotFound)
+    pub fn inc_page_count(
+        buf: &mut [u8; crate::page_rw::PAGE_SIZE],
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<(), Error<D::Error>> {
+        let _ = page_rw.read_page(0, buf)?;
+        let header = buf.as_mut_ptr() as *mut DBHeader;
+        unsafe {
+            (*header).page_count += 1;
         }
+        let _ = page_rw.write_page(0, buf)?;
+        Ok(())
     }
 
     pub fn init(&mut self) -> Result<(), Error<D::Error>> {
-        self.header = Some(self.get_or_create_header()?);
-
-        match &mut self.header {
-            Some(header) => {
-                if header.page_count == 0 {
-                    header.page_count = 2;
-                    header.free_list_head_page = 1;
-                    unsafe {
-                        self.buf.write(0, &header);
-                        let _ = self.page_rw.write_page(0, self.buf.as_ref());
-                    }
-                    let _ = self.page_rw.extend_file_by_pages(1, self.buf.as_mut());
-                }
-
-                unsafe {
-                    for _ in 0..10 {
-                        let free_page_num = PageFreeList::get_free_page(self.buf.as_mut(), &self.page_rw)?;
-                        let _ = PageFreeList::add_to_list(self.buf.as_mut(), free_page_num, &self.page_rw)?;
-                    }
-                }
-            },
-            None => return Err(Error::HeaderNotFound)
+        let mut header = self.get_or_create_header()?;
+        if header.page_count == 0 {
+            header.page_count = 2;
+            header.free_list_head_page = 1;
+            unsafe {
+                self.buf.write(0, &header);
+                let _ = self.page_rw.write_page(0, self.buf.as_ref())?;
+            }
+            let _ = self.page_rw.extend_file_by_pages(1, self.buf.as_mut())?;
         }
-
         Ok(())
     }
 }

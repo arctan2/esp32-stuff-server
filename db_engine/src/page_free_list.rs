@@ -1,5 +1,7 @@
 use crate::page_rw::{PageRW, PAGE_SIZE};
-use embedded_sdmmc::{Error, BlockDevice, TimeSource};
+use crate::db::{Error, Database};
+use embedded_sdmmc::{BlockDevice, TimeSource};
+use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 
 const PAGES_LIST_SIZE: usize = (PAGE_SIZE / size_of::<u32>()) - (size_of::<u32>() * 2);
@@ -13,8 +15,10 @@ pub struct PageFreeList {
 }
 
 impl PageFreeList {
+    // buf and cur is in sync with each other and modify either of them will modify
+    // the other
     pub unsafe fn get_free_page<
-        'a, D: BlockDevice, T: TimeSource,
+        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
         const MAX_DIRS: usize,
         const MAX_FILES: usize,
         const MAX_VOLUMES: usize
@@ -39,6 +43,8 @@ impl PageFreeList {
             if prev_page == 0 {
                 if (*cur).page_count == 0 {
                     page = page_rw.extend_file_by_pages(1, buf)?;
+                    Database::<D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES, A>::inc_page_count(buf, page_rw)?;
+                    buf.fill(0);
                 } else {
                     page = (*cur).pages[0];
                     (*cur).pages[0] = (*cur).pages[((*cur).page_count - 1) as usize];
@@ -64,7 +70,7 @@ impl PageFreeList {
         Ok(page)
     }
 
-    pub unsafe fn add_to_list<
+    pub unsafe fn add_page_to_list<
         'a, D: BlockDevice, T: TimeSource,
         const MAX_DIRS: usize,
         const MAX_FILES: usize,
