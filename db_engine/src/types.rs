@@ -2,7 +2,7 @@ use allocator_api2::boxed::Box;
 use allocator_api2::alloc::Allocator;
 use crate::page_rw::PAGE_SIZE;
 
-pub struct PageBuffer<A: Allocator + Clone>(Box<[u8; PAGE_SIZE], A>);
+pub struct PageBuffer<A: Allocator + Clone>(pub Box<[u8; PAGE_SIZE], A>);
 
 impl <A> PageBuffer<A> where A: Allocator + Clone {
     pub fn new(allocator: A) -> Self {
