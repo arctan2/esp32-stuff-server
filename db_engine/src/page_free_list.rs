@@ -1,5 +1,5 @@
 use crate::page_rw::{PageRW, PAGE_SIZE};
-use crate::db::{Error, Database};
+use crate::db::{Error, Database, FixedPages};
 use embedded_sdmmc::{BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
@@ -28,7 +28,7 @@ impl PageFreeList {
     ) -> Result<u32, Error<D::Error>> {
         let mut prev_page = 0;
         let mut cur_page = 1;
-        let _ = page_rw.read_page(1, buf)?;
+        let _ = page_rw.read_page(FixedPages::FreeList.into(), buf)?;
         let mut cur = buf.as_mut_ptr() as *mut PageFreeList;
 
         while unsafe { (*cur).next_page != 0 } {
@@ -65,6 +65,7 @@ impl PageFreeList {
             }
 
             let _ = page_rw.write_page(cur_page, buf)?;
+            buf.fill(0);
         }
 
         Ok(page)
@@ -81,7 +82,7 @@ impl PageFreeList {
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
     ) -> Result<(), Error<D::Error>> {
         let mut cur_page = 1;
-        let _ = page_rw.read_page(1, buf)?;
+        let _ = page_rw.read_page(FixedPages::FreeList.into(), buf)?;
         let mut cur = buf.as_mut_ptr() as *mut PageFreeList;
         loop {
             unsafe {

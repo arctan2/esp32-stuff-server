@@ -1,8 +1,8 @@
 use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
-use crate::bit;
 use crate::types::PageBuffer;
+use crate::{get_bit};
 
 const NAME_MAX_LEN: usize = 32;
 pub type Name = [u8; NAME_MAX_LEN];
@@ -22,8 +22,9 @@ impl ToName for str {
 }
 
 #[repr(u8)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ColumnType {
+    Null = 0,
     Int = 1,
     Float = 2,
     Chars = 3,
@@ -38,27 +39,44 @@ pub enum Flags {
     Foreign = 1 << 2
 }
 
+impl Flags {
+    pub fn is_set(self, flag: Flags) -> bool {
+        get_bit!(u8, self, flag) == 1
+    }
+}
+
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 pub struct Column {
-    name: Name,
-    flags: Flags,
-    col_type: ColumnType,
-    ref_table_page: u32,
-    ref_col_idx: u16
-}
-
-#[repr(C, packed)]
-pub struct Table {
-    name: Name,
-    rows_btree_page: u32,
-    column_count: u32,
-    columns: [Column; (PAGE_SIZE - (size_of::<Name>() + (size_of::<u32>() * 2))) / size_of::<Column>()]
+    pub name: Name,
+    pub flags: Flags,
+    pub col_type: ColumnType,
+    pub ref_table_page: u32,
+    pub ref_col_idx: u16
 }
 
 #[derive(Debug)]
+#[repr(C, packed)]
+pub struct Table {
+    pub name: Name,
+    pub rows_btree_page: u32,
+    pub col_count: u32,
+    pub columns: [Column; (PAGE_SIZE - (size_of::<Name>() + (size_of::<u32>() * 2))) / size_of::<Column>()]
+}
+
+#[derive(Debug)]
+pub enum Value<'a> {
+    Null,
+    Int(i64),
+    Float(f64),
+    Chars(&'a [u8])
+}
+
+pub type Row<'a, A> = allocator_api2::vec::Vec<Value<'a>, A>;
+
+#[derive(Debug)]
 pub enum TableErr {
-    MaxColumnsReached
+    MaxColumnsReached,
 }
 
 impl Table {
@@ -66,17 +84,17 @@ impl Table {
         Self {
             name: name,
             rows_btree_page: 0,
-            column_count: 0,
+            col_count: 0,
             columns: [Column::empty(); 101]
         }
     }
 
-    pub fn add_column(&mut self, column: Column) -> Result<&mut Self, TableErr> {
-        if self.column_count as usize >= NAME_MAX_LEN {
+    pub fn add_column(mut self, column: Column) -> Result<Self, TableErr> {
+        if self.col_count as usize >= NAME_MAX_LEN {
             return Err(TableErr::MaxColumnsReached);
         }
-        self.columns[self.column_count as usize] = column;
-        self.column_count += 1;
+        self.columns[self.col_count as usize] = column;
+        self.col_count += 1;
         return Ok(self);
     }
 
@@ -84,7 +102,6 @@ impl Table {
         unsafe { buf.write(0, self); }
     }
 }
-
 
 impl Column {
     pub fn new(name: Name, col_type: ColumnType, flags: Flags) -> Self {
