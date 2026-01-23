@@ -1,8 +1,12 @@
 use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
+use embedded_sdmmc::{BlockDevice, TimeSource};
+use crate::PageRW;
 use crate::types::PageBuffer;
-use crate::{get_bit};
+use crate::btree::{BtreePage, BtreeLeaf, BtreeInternal, Key, KEY_MAX_LEN, NodeType};
+use crate::{get_bit, as_ref};
+use allocator_api2::vec::Vec;
 
 const NAME_MAX_LEN: usize = 32;
 pub type Name = [u8; NAME_MAX_LEN];
@@ -74,9 +78,37 @@ pub enum Value<'a> {
 
 pub type Row<'a, A> = allocator_api2::vec::Vec<Value<'a>, A>;
 
+impl<'a> Value<'a> {
+    pub fn to_bytes_vec<A: Allocator + Clone>(&'a self, v: &mut Vec<u8, A>) {
+        match self {
+            Value::Null => {},
+            Value::Int(val) => v.extend_from_slice(&val.to_be_bytes()),
+            Value::Float(val) => v.extend_from_slice(&val.to_be_bytes()),
+            Value::Chars(val) => {
+                let limit = val.len().min(KEY_MAX_LEN);
+                v.extend_from_slice(&val[..limit]);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
-pub enum TableErr {
+pub struct SerializedRow<A: Allocator + Clone> {
+    pub key: Vec<u8, A>,
+    pub null_flags: Vec<u8, A>,
+    pub payload: Vec<u8, A>,
+}
+
+#[derive(Debug)]
+pub enum TableErr<E: core::fmt::Debug> {
+    SdmmcErr(embedded_sdmmc::Error<E>),
     MaxColumnsReached,
+}
+
+impl<DErr> From<embedded_sdmmc::Error<DErr>> for TableErr<DErr> where DErr: core::fmt::Debug {
+    fn from(err: embedded_sdmmc::Error<DErr>) -> Self {
+        TableErr::SdmmcErr(err)
+    }
 }
 
 impl Table {
@@ -89,7 +121,7 @@ impl Table {
         }
     }
 
-    pub fn add_column(mut self, column: Column) -> Result<Self, TableErr> {
+    pub fn add_column<E: core::fmt::Debug>(mut self, column: Column) -> Result<Self, TableErr<E>> {
         if self.col_count as usize >= NAME_MAX_LEN {
             return Err(TableErr::MaxColumnsReached);
         }
@@ -100,6 +132,33 @@ impl Table {
 
     pub fn write_to_buf<A: Allocator + Clone>(&self, buf: &mut PageBuffer<A>) {
         unsafe { buf.write(0, self); }
+    }
+
+    pub fn traverse_to_leaf<
+        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        &self,
+        buf: &mut PageBuffer<A>,
+        key: Key,
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<u32, TableErr<D::Error>> {
+        unsafe {
+            let cur_page = self.rows_btree_page;
+            loop {
+                let _ = page_rw.read_page(cur_page, buf.as_mut());
+                let btree_page = as_ref!(buf, BtreePage);
+                if btree_page.node_type == NodeType::Leaf {
+                    break;
+                }
+                let btree_internal = as_ref!(buf, BtreeInternal);
+                println!("{:?}", btree_internal);
+                todo!("traverse internal node");
+            }
+            return Ok(cur_page);
+        }
     }
 }
 
@@ -124,3 +183,4 @@ impl Column {
         }
     }
 }
+

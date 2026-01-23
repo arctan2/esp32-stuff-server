@@ -24,6 +24,13 @@ unsafe impl <const ORDER: usize> Allocator for SimAllocator<ORDER> {
     }
 }
 
+impl<'a, const ORDER: usize> core::fmt::Debug for SimAllocator<ORDER> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // We use block scopes to copy the values out of the packed struct
+        f.debug_struct("SimAllocator").finish()
+    }
+}
+
 pub static INTERNAL_HEAP: LockedHeap<17> = LockedHeap::empty();
 pub static PSRAM_HEAP: LockedHeap<23> = LockedHeap::empty();
 
