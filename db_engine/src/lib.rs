@@ -5,6 +5,8 @@ mod page_free_list;
 pub mod table;
 mod macros;
 mod btree;
+mod overflow;
+mod buf;
 
 pub use page_rw::PageRW;
 pub use page_free_list::PageFreeList;

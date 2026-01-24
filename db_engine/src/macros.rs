@@ -1,3 +1,5 @@
+use crate::PageFreeList;
+
 #[macro_export]
 macro_rules! get_bit {
     ($t:ty, $val:expr, $bit:expr) => {
@@ -32,3 +34,25 @@ macro_rules! as_ref {
         &*($buf.as_ptr::<$T>(0)) as &$T
     }
 }
+
+#[macro_export]
+macro_rules! get_free_page {
+    ($page_rw:expr, $buf:expr) => {
+        PageFreeList::get_free_page::<D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>(
+            $buf, 
+            $page_rw
+        )
+    };
+}
+
+#[macro_export]
+macro_rules! add_page_to_free_list {
+    ($page_rw:expr, $page_num:expr, $buf:expr) => {
+        PageFreeList::add_page_to_list::<D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>(
+            $buf, 
+            $page_num,
+            $page_rw
+        )
+    };
+}
+

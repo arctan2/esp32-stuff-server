@@ -97,6 +97,7 @@ pub struct SerializedRow<A: Allocator + Clone> {
     pub key: Vec<u8, A>,
     pub null_flags: Vec<u8, A>,
     pub payload: Vec<u8, A>,
+    pub primary_key_idx: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -134,6 +135,11 @@ impl Table {
         unsafe { buf.write(0, self); }
     }
 
+    pub fn get_null_flags_width(&self) -> usize {
+        let s = self.col_count.next_power_of_two() as usize;
+        if s < 8 { 8 } else { s }
+    }
+
     pub fn traverse_to_leaf<
         'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
         const MAX_DIRS: usize,
@@ -142,7 +148,7 @@ impl Table {
     >(
         &self,
         buf: &mut PageBuffer<A>,
-        key: Key,
+        _key: Key,
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
     ) -> Result<u32, TableErr<D::Error>> {
         unsafe {
@@ -154,7 +160,6 @@ impl Table {
                     break;
                 }
                 let btree_internal = as_ref!(buf, BtreeInternal);
-                println!("{:?}", btree_internal);
                 todo!("traverse internal node");
             }
             return Ok(cur_page);

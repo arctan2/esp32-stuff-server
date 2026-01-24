@@ -2,6 +2,7 @@ use allocator_api2::boxed::Box;
 use allocator_api2::alloc::Allocator;
 use crate::page_rw::PAGE_SIZE;
 use core::mem::size_of;
+use crate::buf;
 
 pub struct PageBuffer<A: Allocator + Clone>(pub Box<[u8; PAGE_SIZE], A>);
 
@@ -14,12 +15,12 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
 
     pub unsafe fn write<T>(&mut self, offset: usize, val: &T) {
         unsafe {
-            let bytes = core::slice::from_raw_parts(
-                val as *const T as *const u8,
-                core::mem::size_of::<T>()
-            );
-            self.0[offset..bytes.len()].copy_from_slice(bytes);
+            buf::write(&mut *self.0, offset, val);
         }
+    }
+
+    pub unsafe fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
+        buf::write_bytes(&mut *self.0, offset, bytes);
     }
 
     pub unsafe fn read<T>(&mut self, offset: usize) -> T {
@@ -71,7 +72,31 @@ impl<A: Allocator + Clone> AsMut<[u8; PAGE_SIZE]> for PageBuffer<A> {
     }
 }
 
-pub struct OverflowPage {
-    next: u32,
-    data: [u8; PAGE_SIZE - size_of::<u32>()]
+pub struct PageBufferWriter<'a, A: Allocator + Clone> {
+    buf: &'a mut PageBuffer<A>,
+    pub cur_offset: usize,
+}
+
+impl <'a, A: Allocator + Clone> PageBufferWriter<'a, A> {
+    pub fn new(buf: &'a mut PageBuffer<A>) -> Self {
+        Self {
+            buf: buf,
+            cur_offset: 0
+        }
+    }
+
+    pub fn write<T: core::fmt::Display>(&mut self, val: &T) {
+        unsafe {
+            self.buf.write(self.cur_offset, val);
+        }
+        self.cur_offset += size_of::<T>();
+    }
+
+    pub fn write_slice<S: AsRef<[u8]>>(&mut self, data: S) {
+        let bytes = data.as_ref();
+        unsafe {
+            self.buf.write_bytes(self.cur_offset, bytes);
+        }
+        self.cur_offset += bytes.len();
+    }
 }

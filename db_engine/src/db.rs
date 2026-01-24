@@ -1,31 +1,12 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
-use crate::btree::{BtreeLeaf};
+use crate::btree;
+use crate::btree::{BtreeLeaf, PayloadCell};
 use crate::table::{Table, Column, ColumnType, Flags, TableErr, ToName, Row, Value, Name, SerializedRow};
 use crate::PageRW;
 use crate::types::PageBuffer;
-use crate::PageFreeList;
-use crate::{as_ref_mut, as_ref};
+use crate::{PageFreeList, as_ref_mut, as_ref, get_free_page, add_page_to_free_list};
 use allocator_api2::vec::Vec;
-
-macro_rules! get_free_page {
-    ($self:ident, $buf:expr) => {
-        PageFreeList::get_free_page::<D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>(
-            $buf, 
-            &$self.page_rw
-        )
-    };
-}
-
-macro_rules! add_page_to_free_list {
-    ($self:ident, $page_num:expr, $buf:expr) => {
-        PageFreeList::add_page_to_list::<D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>(
-            $buf, 
-            $page_num,
-            &$self.page_rw
-        )
-    };
-}
 
 pub struct Database<'a, D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize, A: Allocator + Clone>
 where
@@ -35,6 +16,7 @@ where
     page_rw: PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     buf1: PageBuffer<A>,
     buf2: PageBuffer<A>,
+    buf3: PageBuffer<A>,
 }
 
 pub const MAGIC: [u8; 8] = *b"_stufff_";
@@ -141,7 +123,8 @@ where
         return Self {
             page_rw: PageRW::new(file),
             buf1: PageBuffer::new(allocator.clone()),
-            buf2: PageBuffer::new(allocator),
+            buf2: PageBuffer::new(allocator.clone()),
+            buf3: PageBuffer::new(allocator),
         };
     }
 
@@ -174,7 +157,7 @@ where
             .write_to_buf(&mut self.buf1);
 
         unsafe {
-            let free_page = get_free_page!(self, &mut self.buf2)?;
+            let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
             self.page_rw.write_page(free_page, self.buf1.as_ref())?;
         }
 
@@ -186,6 +169,7 @@ where
         let mut null_flags: u64 = 0;
         let mut i = 0;
         let mut key: Vec<u8, A> = Vec::new_in(allocator.clone());
+        let mut primary_key_idx: Option<usize> = None;
 
         while i < row.len() {
             let col = &table.columns[i];
@@ -233,6 +217,7 @@ where
 
             if table.columns[i].flags.is_set(Flags::Primary) {
                 row[i].to_bytes_vec(&mut key);
+                primary_key_idx = Some(i);
             }
 
             i += 1;
@@ -248,6 +233,7 @@ where
             key: key,
             null_flags: null_flags,
             payload: payload,
+            primary_key_idx: primary_key_idx,
         })
     }
 
@@ -261,10 +247,16 @@ where
             }
 
             let serialized_row = self.serialized_row(table, &row, allocator.clone())?;
-            // let leaf_page = table.traverse_to_leaf(&mut self.buf2, row[primary_key as usize].to_bytes_vec(&mut key), &self.page_rw)?;
-            // let _ = self.page_rw.read_page(leaf_page, self.buf2.as_mut())?;
-            // let leaf = as_ref_mut!(self.buf2, BtreeLeaf);
             println!("serialized_row = {:?}", serialized_row);
+            PayloadCell::create_payload_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3);
+            let payload_cell = as_ref!(self.buf2, PayloadCell);
+            let leaf_page = table.traverse_to_leaf(
+                &mut self.buf3,
+                payload_cell.key,
+                &self.page_rw)?;
+            let _ = self.page_rw.read_page(leaf_page, self.buf3.as_mut())?;
+            let leaf = as_ref_mut!(self.buf3, BtreeLeaf);
+            btree::insert_payload_to_leaf(table, &mut self.buf3, leaf, leaf_page, &self.page_rw, payload_cell);
             // let is_duplicate = leaf.check_duplicate_by_primary_key(primary_key as usize, &row[primary_key as usize]);
             // println!("is_duplicate = {}", is_duplicate);
         }
@@ -277,14 +269,14 @@ where
             let db_cat = as_ref_mut!(self.buf1, Table);
 
             if db_cat.rows_btree_page == 0 {
-                let free_page = get_free_page!(self, &mut self.buf2)?;
+                let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
                 db_cat.rows_btree_page = free_page;
                 self.page_rw.write_page(FixedPages::DbCat.into(), self.buf1.as_ref())?;
                 let btree_leaf = as_ref_mut!(self.buf2, BtreeLeaf);
                 btree_leaf.init();
                 self.page_rw.write_page(free_page, self.buf2.as_ref())?;
             }
-            let free_page = get_free_page!(self, &mut self.buf2)?;
+            let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
             let mut row = Row::new_in(allocator.clone());
             row.push(Value::Chars(name.as_ref()));
             row.push(Value::Int(free_page as i64));
@@ -302,7 +294,7 @@ where
         let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
         let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
         let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("cool_table".to_name(), &[path, size, name], allocator)?;
+        let _ = self.create_table("cool_table".to_name(), &[path, size, name], allocator.clone())?;
         Ok(())
     }
 }
