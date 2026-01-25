@@ -2,7 +2,7 @@ use allocator_api2::boxed::Box;
 use allocator_api2::alloc::Allocator;
 use crate::page_rw::PAGE_SIZE;
 use core::mem::size_of;
-use crate::buf;
+use crate::buffer;
 
 pub struct PageBuffer<A: Allocator + Clone>(pub Box<[u8; PAGE_SIZE], A>);
 
@@ -15,15 +15,15 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
 
     pub unsafe fn write<T>(&mut self, offset: usize, val: &T) {
         unsafe {
-            buf::write(&mut *self.0, offset, val);
+            buffer::write(&mut *self.0, offset, val);
         }
     }
 
     pub unsafe fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
-        buf::write_bytes(&mut *self.0, offset, bytes);
+        buffer::write_bytes(&mut *self.0, offset, bytes);
     }
 
-    pub unsafe fn read<T>(&mut self, offset: usize) -> T {
+    pub unsafe fn read<T>(&self, offset: usize) -> T {
         unsafe {
             let size = core::mem::size_of::<T>();
             let src_slice = &self.0[offset..offset + size];
@@ -37,9 +37,9 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
         ptr
     }
 
-    pub unsafe fn as_ptr<T>(&mut self, offset: usize) -> *const T {
+    pub unsafe fn as_ptr<T>(&self, offset: usize) -> *const T {
         let size = core::mem::size_of::<T>();
-        let ptr = self.0[offset..offset + size].as_mut_ptr() as *const T;
+        let ptr = self.0[offset..offset + size].as_ptr() as *const T;
         ptr
     }
 
@@ -51,10 +51,10 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
         }
     }
 
-    pub unsafe fn as_type_ref<T>(&mut self, offset: usize) -> &T {
+    pub unsafe fn as_type_ref<T>(&self, offset: usize) -> &T {
         unsafe {
             let size = core::mem::size_of::<T>();
-            let ptr = &*(self.0[offset..offset + size].as_mut_ptr() as *const T) as &T;
+            let ptr = &*(self.0[offset..offset + size].as_ptr() as *const T) as &T;
             ptr
         }
     }

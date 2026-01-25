@@ -25,6 +25,9 @@ macro_rules! clear_bit {
 macro_rules! as_ref_mut {
     ($buf:expr, $T:ty) => {
         &mut *($buf.as_ptr_mut::<$T>(0)) as &mut $T
+    };
+    ($buf:expr, $T:ty, $off:expr) => {
+        &mut *($buf.as_ptr_mut::<$T>($off)) as &mut $T
     }
 }
 
@@ -32,6 +35,9 @@ macro_rules! as_ref_mut {
 macro_rules! as_ref {
     ($buf:expr, $T:ty) => {
         &*($buf.as_ptr::<$T>(0)) as &$T
+    };
+    ($buf:expr, $T:ty, $off:expr) => {
+        &*($buf.as_ptr::<$T>($off)) as &$T
     }
 }
 

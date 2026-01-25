@@ -250,15 +250,9 @@ where
             println!("serialized_row = {:?}", serialized_row);
             PayloadCell::create_payload_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3);
             let payload_cell = as_ref!(self.buf2, PayloadCell);
-            let leaf_page = table.traverse_to_leaf(
-                &mut self.buf3,
-                payload_cell.key,
-                &self.page_rw)?;
-            let _ = self.page_rw.read_page(leaf_page, self.buf3.as_mut())?;
-            let leaf = as_ref_mut!(self.buf3, BtreeLeaf);
-            btree::insert_payload_to_leaf(table, &mut self.buf3, leaf, leaf_page, &self.page_rw, payload_cell);
-            // let is_duplicate = leaf.check_duplicate_by_primary_key(primary_key as usize, &row[primary_key as usize]);
-            // println!("is_duplicate = {}", is_duplicate);
+            let mut path = Vec::new_in(allocator.clone());
+            let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key, &self.page_rw, &mut path)?;
+            btree::insert_payload_to_leaf(table, &mut self.buf3, &mut self.buf2, leaf_page, &self.page_rw, path, allocator.clone());
         }
         Ok(())
     }
@@ -294,7 +288,7 @@ where
         let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
         let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
         let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("cool_table".to_name(), &[path, size, name], allocator.clone())?;
+        let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
         Ok(())
     }
 }

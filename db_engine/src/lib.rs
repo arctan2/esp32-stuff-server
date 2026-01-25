@@ -6,7 +6,7 @@ pub mod table;
 mod macros;
 mod btree;
 mod overflow;
-mod buf;
+mod buffer;
 
 pub use page_rw::PageRW;
 pub use page_free_list::PageFreeList;

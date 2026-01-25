@@ -139,32 +139,6 @@ impl Table {
         let s = self.col_count.next_power_of_two() as usize;
         if s < 8 { 8 } else { s }
     }
-
-    pub fn traverse_to_leaf<
-        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
-        &self,
-        buf: &mut PageBuffer<A>,
-        _key: Key,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<u32, TableErr<D::Error>> {
-        unsafe {
-            let cur_page = self.rows_btree_page;
-            loop {
-                let _ = page_rw.read_page(cur_page, buf.as_mut());
-                let btree_page = as_ref!(buf, BtreePage);
-                if btree_page.node_type == NodeType::Leaf {
-                    break;
-                }
-                let btree_internal = as_ref!(buf, BtreeInternal);
-                todo!("traverse internal node");
-            }
-            return Ok(cur_page);
-        }
-    }
 }
 
 impl Column {
