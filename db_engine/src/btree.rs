@@ -8,7 +8,7 @@ use allocator_api2::vec::Vec;
 use crate::{as_ref, as_ref_mut, PageRW};
 use crate::table::{Value, SerializedRow, Table, TableErr};
 use crate::overflow::OverflowPage;
-use crate::db::Error;
+use crate::db::{InsertErr, Error};
 use crate::buffer;
 use embedded_sdmmc::{BlockDevice, TimeSource};
 
@@ -29,16 +29,22 @@ offsets[
     offset_of("other_cool_table")
     offset_of("some_table")
 ]
-
+        |
+        |
+        v
+    <free_space>
+        ^
+        |
+        |
 Cell {
-    key: { len: u8 = 16, bytes: [other_cool_table] }
+    key: { len: u8 = 10, bytes: [some_table] }
     payload_total_len: 32 + 8,
     payload_overflow: 0,
     null_flags: u8/u16/u32/u64 based on the number of columns in table,
     payload: ["other_cool_table", 6] <- it will be in binary format
 }
 Cell {
-    key: { len: u8 = 10, bytes: [some_table] }
+    key: { len: u8 = 16, bytes: [other_cool_table] }
     payload_total_len: 32 + 8,
     payload_overflow: 0,
     null_flags: u8/u16/u32/u64 based on the number of columns in table,
@@ -99,7 +105,8 @@ pub struct Key {
 impl AsRef<[u8]> for Key {
     fn as_ref(&self) -> &[u8] {
         unsafe {
-            core::slice::from_raw_parts(self.bytes, self.len.into())
+            let data_ptr = (self as *const Key as *const u8).add(1);
+            core::slice::from_raw_parts(data_ptr, self.len as usize)
         }
     }
 }
@@ -107,7 +114,8 @@ impl AsRef<[u8]> for Key {
 impl AsMut<[u8]> for Key {
     fn as_mut(&mut self) -> &mut [u8] {
         unsafe {
-            core::slice::from_raw_parts_mut(self.bytes, self.len.into())
+            let data_ptr = (self as *mut Key as *mut u8).add(1);
+            core::slice::from_raw_parts_mut(data_ptr, self.len as usize)
         }
     }
 }
@@ -161,13 +169,58 @@ struct BtreeCell<'a> {
 }
 
 impl <'a> BtreeCell<'a> {
-    pub fn from_leaf_payload<A: Allocator + Clone>(
-        payload_cell: &'a PayloadCell, buf: &'a PageBuffer<A>, offset: usize, payload_size: usize
-    ) -> Self {
+    pub fn from_leaf_payload(cell: &'a PayloadCell, raw_buf: &'a [u8], offset: usize, payload_size: usize) -> Self {
         Self {
-            key: &payload_cell.key,
-            payload_cell: &buf.as_ref()[offset..payload_size]
+            key: &cell.key,
+            payload_cell: &raw_buf[offset..offset + payload_size]
         }
+    }
+}
+
+type BtreeCells<'a, A> = Vec<BtreeCell<'a>, A>;
+
+trait BtreeCellsOps {
+    fn total_size(&self) -> usize;
+    fn sort_last_cell(&mut self);
+    fn binary_search_by_key(&self, key: &Key) -> Option<usize>;
+}
+
+impl <'a, A: Allocator> BtreeCellsOps for BtreeCells<'a, A> {
+    fn total_size(&self) -> usize {
+        self.iter().map(|cell| cell.payload_cell.len()).sum()
+    }
+
+    fn sort_last_cell(&mut self) {
+        if self.len() <= 1 {
+            return;
+        }
+        let mut idx = self.len() - 1;
+
+        while idx > 0 && self[idx].key < &self[idx - 1].key {
+            self.swap(idx, idx - 1);
+            idx -= 1;
+        }
+    }
+
+    fn binary_search_by_key(&self, key: &Key) -> Option<usize>{
+        let mut h = self.len();
+        let mut l = 0;
+
+        while l < h {
+            let m = (l + h) / 2;
+
+            if self[m].key == key {
+                return Some(m);
+            }
+
+            if self[m].key < key {
+                l = m + 1;
+            } else {
+                h = m;
+            }
+        }
+
+        return None;
     }
 }
 
@@ -176,10 +229,6 @@ impl BtreeLeaf {
         self.node_type = NodeType::Leaf;
         self.free_start = LEAF_META_SIZE as u16;
         self.free_end = PAGE_SIZE as u16;
-    }
-
-    pub fn check_duplicate_by_primary_key(&mut self, primary_key: usize, val: &Value) -> bool {
-        return true;
     }
 
     pub fn get_offsets_mut(&mut self) -> &mut [u16] {
@@ -196,19 +245,17 @@ impl BtreeLeaf {
         };
     }
 
-    pub fn read_btree_cells<'a, A: Allocator + Clone>(
-        &self, table: &Table, buf: &'a PageBuffer<A>, allocator: A
-    ) -> Vec<BtreeCell<'a>, A> {
+    pub fn read_btree_cells<'a, A: Allocator>(&'a self, table: &Table, allocator: A) -> BtreeCells<'a, A> {
         unsafe {
-            let mut cells: Vec<BtreeCell, A> = Vec::new_in(allocator);
+            let mut cells: BtreeCells<A> = BtreeCells::new_in(allocator);
             let ptr = self.data.as_ptr();
             let offsets: &[u16] = unsafe {
                 std::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
             };
 
             for i in offsets.iter() {
-                let payload_cell = as_ref!(buf, PayloadCell, *i as usize);
-                let cell = BtreeCell::from_leaf_payload(payload_cell, buf, *i as usize, payload_cell.get_size(table));
+                let payload_cell = buffer::as_ref::<PayloadCell>(&self.data, *i as usize);
+                let cell = BtreeCell::from_leaf_payload(payload_cell, &self.data, *i as usize, payload_cell.get_size(table));
                 cells.push(cell);
             }
 
@@ -216,7 +263,7 @@ impl BtreeLeaf {
         }
     }
 
-    pub fn write_btree_cells<A: Allocator + Clone>(&mut self, cells: &Vec<BtreeCell, A>) {
+    pub fn write_btree_cells<A: Allocator>(&mut self, cells: &BtreeCells<A>) {
         self.key_count = cells.len() as u16;
         let mut end = self.data.len();
 
@@ -295,17 +342,23 @@ pub fn insert_payload_to_leaf<
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     mut path: Vec<u32, A>,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), InsertErr<D::Error>> {
     unsafe {
         let _ = page_rw.read_page(leaf_page, buf.as_mut())?;
         let leaf = as_ref_mut!(buf, BtreeLeaf);
-        let mut cells = leaf.read_btree_cells(table, buf, allocator);
+        let mut cells = leaf.read_btree_cells(table, allocator);
         let payload_cell = as_ref!(payload_cell_buf, PayloadCell);
-        cells.push(
-            BtreeCell::from_leaf_payload(payload_cell, payload_cell_buf, 0, payload_cell.get_size(table))
-        );
-        let total_size: usize = cells.iter().map(|cell| cell.payload_cell.len()).sum();
+
+        if let Some(_) = cells.binary_search_by_key(&payload_cell.key) {
+            return Err(InsertErr::DuplicateKey);
+        }
+
+        cells.push(BtreeCell::from_leaf_payload(payload_cell, payload_cell_buf.as_ref(), 0, payload_cell.get_size(table)));
+        cells.sort_last_cell();
+
+        let leaf = as_ref_mut!(buf, BtreeLeaf);
         leaf.write_btree_cells(&cells);
+        page_rw.write_page(leaf_page, buf.as_ref())?;
         Ok(())
     }
 }

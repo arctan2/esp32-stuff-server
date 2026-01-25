@@ -45,17 +45,13 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
 
     pub unsafe fn as_type_mut<T>(&mut self, offset: usize) -> &mut T {
         unsafe {
-            let size = core::mem::size_of::<T>();
-            let ptr = &mut *(self.0[offset..offset + size].as_mut_ptr() as *mut T) as &mut T;
-            ptr
+            buffer::as_mut::<T>(&mut *self.0, offset)
         }
     }
 
     pub unsafe fn as_type_ref<T>(&self, offset: usize) -> &T {
         unsafe {
-            let size = core::mem::size_of::<T>();
-            let ptr = &*(self.0[offset..offset + size].as_ptr() as *const T) as &T;
-            ptr
+            buffer::as_ref::<T>(&*self.0, offset)
         }
     }
 }

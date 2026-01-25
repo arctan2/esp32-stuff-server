@@ -58,26 +58,6 @@ impl DBHeader {
     }
 }
 
-#[derive(Debug)]
-pub enum Error<E: core::fmt::Debug> {
-    SdmmcErr(embedded_sdmmc::Error<E>),
-    TableErr(TableErr<E>),
-    FreeListNotFound,
-    HeaderNotFound
-}
-
-impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
-    fn from(err: embedded_sdmmc::Error<DErr>) -> Self {
-        Error::SdmmcErr(err)
-    }
-}
-
-impl<E> From<TableErr<E>> for Error<E> where E: core::fmt::Debug {
-    fn from(err: TableErr<E>) -> Self {
-        Error::TableErr(err)
-    }
-}
-
 #[repr(u32)]
 pub enum FixedPages {
     Header = 0,
@@ -93,6 +73,7 @@ pub enum InsertErr<E: core::fmt::Debug> {
     CannotBeNull,
     TypeDoesNotMatch,
     CharsTooLong,
+    DuplicateKey
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for InsertErr<DErr> where DErr: core::fmt::Debug {
@@ -112,6 +93,34 @@ impl From<FixedPages> for u32 {
         page as u32
     }
 }
+
+#[derive(Debug)]
+pub enum Error<E: core::fmt::Debug> {
+    SdmmcErr(embedded_sdmmc::Error<E>),
+    InsertErr(InsertErr<E>),
+    TableErr(TableErr<E>),
+    FreeListNotFound,
+    HeaderNotFound
+}
+
+impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
+    fn from(err: embedded_sdmmc::Error<DErr>) -> Self {
+        Error::SdmmcErr(err)
+    }
+}
+
+impl<E> From<TableErr<E>> for Error<E> where E: core::fmt::Debug {
+    fn from(err: TableErr<E>) -> Self {
+        Error::TableErr(err)
+    }
+}
+
+impl<E> From<InsertErr<E>> for Error<E> where E: core::fmt::Debug {
+    fn from(err: InsertErr<E>) -> Self {
+        Error::InsertErr(err)
+    }
+}
+
 
 impl <'a, D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize, A: Allocator + Clone + core::fmt::Debug>
 Database<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES, A>
@@ -252,7 +261,7 @@ where
             let payload_cell = as_ref!(self.buf2, PayloadCell);
             let mut path = Vec::new_in(allocator.clone());
             let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key, &self.page_rw, &mut path)?;
-            btree::insert_payload_to_leaf(table, &mut self.buf3, &mut self.buf2, leaf_page, &self.page_rw, path, allocator.clone());
+            btree::insert_payload_to_leaf(table, &mut self.buf3, &mut self.buf2, leaf_page, &self.page_rw, path, allocator.clone())?;
         }
         Ok(())
     }
@@ -274,7 +283,7 @@ where
             let mut row = Row::new_in(allocator.clone());
             row.push(Value::Chars(name.as_ref()));
             row.push(Value::Int(free_page as i64));
-            self.insert_to_table(2, row, allocator).unwrap();
+            self.insert_to_table(2, row, allocator)?;
         }
         Ok(())
     }
@@ -285,10 +294,12 @@ where
             self.create_new_db(header)?;
         }
 
-        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
+        for i in 0..1 {
+            let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
+            let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
+            let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
+            let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
+        }
         Ok(())
     }
 }
