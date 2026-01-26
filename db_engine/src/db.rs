@@ -1,7 +1,7 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
-use crate::btree::{BtreeLeaf, PayloadCell};
+use crate::btree::{BtreeLeaf, PayloadCellView};
 use crate::table::{Table, Column, ColumnType, Flags, TableErr, ToName, Row, Value, Name, SerializedRow};
 use crate::PageRW;
 use crate::types::PageBuffer;
@@ -17,6 +17,7 @@ where
     buf1: PageBuffer<A>,
     buf2: PageBuffer<A>,
     buf3: PageBuffer<A>,
+    buf4: PageBuffer<A>,
 }
 
 pub const MAGIC: [u8; 8] = *b"_stufff_";
@@ -133,7 +134,8 @@ where
             page_rw: PageRW::new(file),
             buf1: PageBuffer::new(allocator.clone()),
             buf2: PageBuffer::new(allocator.clone()),
-            buf3: PageBuffer::new(allocator),
+            buf3: PageBuffer::new(allocator.clone()),
+            buf4: PageBuffer::new(allocator),
         };
     }
 
@@ -257,11 +259,15 @@ where
 
             let serialized_row = self.serialized_row(table, &row, allocator.clone())?;
             println!("serialized_row = {:?}", serialized_row);
-            PayloadCell::create_payload_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3);
-            let payload_cell = as_ref!(self.buf2, PayloadCell);
+            PayloadCellView::create_payload_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3);
+            let payload_cell = PayloadCellView::new(self.buf2.as_ref(), 0);
             let mut path = Vec::new_in(allocator.clone());
-            let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key, &self.page_rw, &mut path)?;
-            btree::insert_payload_to_leaf(table, &mut self.buf3, &mut self.buf2, leaf_page, &self.page_rw, path, allocator.clone())?;
+            let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key(), &self.page_rw, &mut path)?;
+            btree::insert_payload_to_leaf(
+                table, &mut self.buf3, &mut self.buf4,
+                payload_cell, leaf_page,
+                &self.page_rw, path, allocator.clone()
+            )?;
         }
         Ok(())
     }
@@ -293,13 +299,21 @@ where
         if header.page_count == 0 {
             self.create_new_db(header)?;
         }
+        
+        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
+        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
+        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
+        let _ = self.create_table("ccccccccccc".to_name(), &[path, size, name], allocator.clone())?;
 
-        for i in 0..1 {
-            let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-            let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-            let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-            let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
-        }
+        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
+        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
+        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
+        let _ = self.create_table("bbbbbbbbbb".to_name(), &[path, size, name], allocator.clone())?;
+
+        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
+        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
+        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
+        let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
         Ok(())
     }
 }

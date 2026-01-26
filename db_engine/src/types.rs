@@ -20,7 +20,9 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
     }
 
     pub unsafe fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
-        buffer::write_bytes(&mut *self.0, offset, bytes);
+        unsafe {
+            buffer::write_bytes(&mut *self.0, offset, bytes);
+        }
     }
 
     pub unsafe fn read<T>(&self, offset: usize) -> T {

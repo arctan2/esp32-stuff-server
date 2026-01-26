@@ -25,7 +25,6 @@ where
     D: BlockDevice,
     T: TimeSource,
 {
-
     pub fn new(file: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>) -> Self {
         Self {
             file: file

@@ -135,9 +135,9 @@ impl Table {
         unsafe { buf.write(0, self); }
     }
 
-    pub fn get_null_flags_width(&self) -> usize {
+    pub fn get_null_flags_width_bytes(&self) -> usize {
         let s = self.col_count.next_power_of_two() as usize;
-        if s < 8 { 8 } else { s }
+        (if s < 8 { 8 } else { s }) / 8
     }
 }
 
