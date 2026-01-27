@@ -14,6 +14,7 @@ where
     T: TimeSource,
 {
     page_rw: PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    table_buf: PageBuffer<A>,
     buf1: PageBuffer<A>,
     buf2: PageBuffer<A>,
     buf3: PageBuffer<A>,
@@ -67,26 +68,12 @@ pub enum FixedPages {
 }
 
 #[derive(Debug)]
-pub enum InsertErr<E: core::fmt::Debug> {
-    SdmmcErr(embedded_sdmmc::Error<E>),
-    TableErr(TableErr<E>),
+pub enum InsertErr {
     ColCountDoesNotMatch,
     CannotBeNull,
     TypeDoesNotMatch,
     CharsTooLong,
     DuplicateKey
-}
-
-impl<DErr> From<embedded_sdmmc::Error<DErr>> for InsertErr<DErr> where DErr: core::fmt::Debug {
-    fn from(err: embedded_sdmmc::Error<DErr>) -> Self {
-        InsertErr::SdmmcErr(err)
-    }
-}
-
-impl<E> From<TableErr<E>> for InsertErr<E> where E: core::fmt::Debug {
-    fn from(err: TableErr<E>) -> Self {
-        InsertErr::TableErr(err)
-    }
 }
 
 impl From<FixedPages> for u32 {
@@ -98,7 +85,7 @@ impl From<FixedPages> for u32 {
 #[derive(Debug)]
 pub enum Error<E: core::fmt::Debug> {
     SdmmcErr(embedded_sdmmc::Error<E>),
-    InsertErr(InsertErr<E>),
+    Insert(InsertErr),
     TableErr(TableErr<E>),
     FreeListNotFound,
     HeaderNotFound
@@ -116,9 +103,9 @@ impl<E> From<TableErr<E>> for Error<E> where E: core::fmt::Debug {
     }
 }
 
-impl<E> From<InsertErr<E>> for Error<E> where E: core::fmt::Debug {
-    fn from(err: InsertErr<E>) -> Self {
-        Error::InsertErr(err)
+impl<E> From<InsertErr> for Error<E> where E: core::fmt::Debug {
+    fn from(err: InsertErr) -> Self {
+        Error::Insert(err)
     }
 }
 
@@ -132,6 +119,7 @@ where
     pub fn new(file: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, allocator: A) -> Self {
         return Self {
             page_rw: PageRW::new(file),
+            table_buf: PageBuffer::new(allocator.clone()),
             buf1: PageBuffer::new(allocator.clone()),
             buf2: PageBuffer::new(allocator.clone()),
             buf3: PageBuffer::new(allocator.clone()),
@@ -175,7 +163,7 @@ where
         Ok(())
     }
 
-    fn serialized_row(&self, table: &Table, row: &Row<'a, A>, allocator: A) -> Result<SerializedRow<A>, InsertErr<D::Error>> {
+    fn serialized_row(&self, table: &Table, row: &Row<'a, A>, allocator: A) -> Result<SerializedRow<A>, InsertErr> {
         let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
         let mut null_flags: u64 = 0;
         let mut i = 0;
@@ -248,26 +236,30 @@ where
         })
     }
 
-    pub fn insert_to_table(&mut self, table: u32, row: Row<'_, A>, allocator: A) -> Result<(), InsertErr<D::Error>> {
+    pub fn insert_to_table(&mut self, table_page: u32, row: Row<'_, A>, allocator: A) -> Result<(), Error<D::Error>> {
         unsafe {
-            let table = self.page_rw.read_page(table, self.buf1.as_mut());
-            let table = as_ref!(self.buf1, Table);
+            let _ = self.page_rw.read_page(table_page, self.table_buf.as_mut())?;
+            let table = as_ref_mut!(self.table_buf, Table);
 
             if table.col_count as usize != row.len() {
-                return Err(InsertErr::ColCountDoesNotMatch);
+                return Err(Error::Insert(InsertErr::ColCountDoesNotMatch));
             }
 
             let serialized_row = self.serialized_row(table, &row, allocator.clone())?;
-            println!("serialized_row = {:?}", serialized_row);
-            PayloadCellView::create_payload_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3);
+            let payload_cell_buf = &mut self.buf2;
+            // println!("serialized_row = {:?}", serialized_row);
+            PayloadCellView::new_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3)?;
             let payload_cell = PayloadCellView::new(self.buf2.as_ref(), 0);
             let mut path = Vec::new_in(allocator.clone());
             let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key(), &self.page_rw, &mut path)?;
             btree::insert_payload_to_leaf(
-                table, &mut self.buf3, &mut self.buf4,
-                payload_cell, leaf_page,
-                &self.page_rw, path, allocator.clone()
+                &mut self.buf2, &mut self.buf3,
+                &mut self.buf1, &mut self.buf4,
+                leaf_page, table,
+                &self.page_rw, path,
+                allocator.clone()
             )?;
+            self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
         }
         Ok(())
     }
@@ -299,21 +291,14 @@ where
         if header.page_count == 0 {
             self.create_new_db(header)?;
         }
+
+        for i in 0..1000 {
+            let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
+            let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
+            let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
+            let _ = self.create_table(format!("table_{}", i + 1).to_name(), &[path, size, name], allocator.clone())?;
+        }
         
-        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("ccccccccccc".to_name(), &[path, size, name], allocator.clone())?;
-
-        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("bbbbbbbbbb".to_name(), &[path, size, name], allocator.clone())?;
-
-        let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-        let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-        let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-        let _ = self.create_table("aaaaaaaa".to_name(), &[path, size, name], allocator.clone())?;
         Ok(())
     }
 }
