@@ -1,8 +1,9 @@
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
 use allocator_api2::alloc::Allocator;
+use allocator_api2::vec::Vec;
 use embedded_sdmmc::{BlockDevice, TimeSource};
-use crate::{get_free_page, as_ref_mut, PageRW, PageFreeList};
+use crate::{get_free_page, as_ref_mut, as_ref, PageRW, PageFreeList};
 use crate::types::{PageBuffer};
 use crate::db::Error;
 
@@ -50,6 +51,37 @@ impl OverflowPage {
             }
 
             Ok(new_page)
+        }
+    }
+
+     pub fn read_all<
+        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+        mut page_num: u32,
+        v: &mut Vec<u8, A>,
+        buf: &mut PageBuffer<A>,
+    ) -> Result<(), Error<D::Error>> {
+        unsafe {
+            let mut remaining = v.capacity();
+
+            while page_num != 0 && remaining > 0 {
+                page_rw.read_page(page_num, buf.as_mut())?;
+                let ov = as_ref!(buf, OverflowPage);
+
+                let chunk_size = ov.data.len().min(remaining);
+                v.extend_from_slice(&ov.data[..chunk_size]);
+
+                remaining -= chunk_size;
+                page_num = ov.next;
+            }
+
+            v.truncate(v.capacity());
+
+            Ok(())
         }
     }
 }

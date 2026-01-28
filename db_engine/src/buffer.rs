@@ -25,6 +25,9 @@ pub unsafe fn as_ref<T>(buf: &[u8], offset: usize) -> &T {
     }
 }
 
+pub fn as_slice(buf: &[u8], offset: usize, len: usize) -> &[u8] {
+    &buf[offset..offset + len]
+}
 
 pub fn copy_buf(dest: &mut [u8], src: &[u8]) {
     dest.copy_from_slice(src);

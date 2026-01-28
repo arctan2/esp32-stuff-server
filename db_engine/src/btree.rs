@@ -2,11 +2,12 @@
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
 use core::cmp::Ordering;
-use crate::types::{PageBuffer, PageBufferWriter};
+use crate::types::{PageBuffer, PageBufferWriter, PageBufferReader};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use crate::{as_ref, as_ref_mut, PageRW, get_free_page, PageFreeList};
-use crate::table::{Value, SerializedRow, Table, TableErr};
+use crate::table::{Table, TableErr};
+use crate::serde_row::{Value, SerializedRow};
 use crate::overflow::OverflowPage;
 use crate::db::{Error, InsertErr};
 use crate::buffer;
@@ -56,7 +57,6 @@ Cell {
 
 pub const KEY_MAX_LEN: usize = 64;
 pub const MAX_INLINE_LEN: usize = 255;
-
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(u8)]
@@ -177,20 +177,24 @@ impl PartialOrd for Key {
 }
 
 impl <'a> PayloadCellView<'a> {
-    pub fn new_unsafe(raw_buf_ptr: *const u8, size: usize, offset: usize) -> Self {
+    fn new_unsafe(table: &Table, raw_buf_ptr: *const u8, size: usize, offset: usize) -> Self {
         let raw_buf = unsafe { core::slice::from_raw_parts(raw_buf_ptr, size) };
         let (header_bytes, data_bytes) = raw_buf[offset..].split_at(core::mem::size_of::<PayloadCellHeader>());
         let header = unsafe { &*(header_bytes.as_ptr() as *const PayloadCellHeader) };
-        return Self { header, data: data_bytes };
+        let mut s = Self { header, data: data_bytes };
+        s.data = &s.data[0..s.data_size(table)];
+        return s;
     }
 
-    pub fn new(raw_buf: &'a [u8], offset: usize) -> Self {
+    pub fn new(table: &Table, raw_buf: &'a [u8], offset: usize) -> Self {
         let (header_bytes, data_bytes) = raw_buf[offset..].split_at(core::mem::size_of::<PayloadCellHeader>());
         let header = unsafe { &*(header_bytes.as_ptr() as *const PayloadCellHeader) };
-        Self { header, data: data_bytes }
+        let mut s = Self { header, data: data_bytes };
+        s.data = &s.data[0..s.data_size(table)];
+        return s;
     }
 
-    pub fn null_flags(&self, width: usize) -> &'a [u8] {
+    fn null_flags(&self, width: usize) -> &'a [u8] {
         let key_len = self.data[0] as usize;
         let start = 1 + key_len;
         &self.data[start..start + width]
@@ -202,13 +206,40 @@ impl <'a> PayloadCellView<'a> {
         &self.data[start..start + self.header.payload_inline_len as usize]
     }
 
+    pub fn key(&self) -> &'a Key {
+        let key_len = self.data[0] as usize;
+        unsafe { &*(self.data[0..1 + key_len].as_ptr() as *const Key) as &Key }
+    }
+
+    fn data_size(&self, table: &Table) -> usize {
+        size_of::<u8>() +
+        table.get_null_flags_width_bytes() +
+        self.key().len as usize +
+        self.header.payload_inline_len as usize
+    }
+
+    fn size(&self, table: &Table) -> usize {
+        (size_of::<u32>() * 2) +
+        (size_of::<u8>() * 2) +
+        table.get_null_flags_width_bytes() +
+        self.key().len as usize +
+        self.header.payload_inline_len as usize
+    }
+
+    fn as_bytes(&self, table: &Table) -> &'a [u8] {
+        unsafe {
+            let ptr = self.header as *const PayloadCellHeader as *const u8;
+            core::slice::from_raw_parts(ptr, self.size(table))
+        }
+    }
+
     pub fn new_to_buf<
         D: BlockDevice, T: TimeSource, A: Allocator + Clone,
         const MAX_DIRS: usize,
         const MAX_FILES: usize,
         const MAX_VOLUMES: usize
     >(
-        table: &Table, 
+        table: &Table,
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
         row: SerializedRow<A>,
         buf: &mut PageBuffer<A>,
@@ -230,6 +261,7 @@ impl <'a> PayloadCellView<'a> {
         } else {
             0 as u32
         };
+
         buf_writer.write(&payload_overflow_page);
         buf_writer.write(&(inline_len as u8));
         buf_writer.write(&key_len);
@@ -239,33 +271,35 @@ impl <'a> PayloadCellView<'a> {
 
         Ok(())
     }
-
-    pub fn key(&self) -> &'a Key {
-        let key_len = self.data[0] as usize;
-        unsafe { &*(self.data[0..1 + key_len].as_ptr() as *const Key) as &Key }
-    }
-
-    fn size(&self, table: &Table) -> usize {
-        (size_of::<u32>() * 2) +
-        (size_of::<u8>() * 2) +
-        table.get_null_flags_width_bytes() +
-        self.key().len as usize +
-        self.header.payload_inline_len as usize
-    }
-
-    fn as_bytes(&self, table: &Table) -> &'a [u8] {
-        unsafe {
-            let ptr = self.header as *const PayloadCellHeader as *const u8;
-            core::slice::from_raw_parts(ptr, self.size(table))
-        }
-    }
 }
 
 impl <'a> InternalCellView<'a> {
     pub fn new(raw_buf: &'a [u8], offset: usize) -> Self {
         let (header_bytes, data_bytes) = raw_buf[offset..].split_at(core::mem::size_of::<InternalCellHeader>());
         let header = unsafe { &*(header_bytes.as_ptr() as *const InternalCellHeader) };
-        Self { header, data: data_bytes }
+        let mut s = Self { header, data: data_bytes };
+        s.data = &s.data[0..s.data_size()];
+        return s;
+    }
+
+    pub fn key(&self) -> &'a Key {
+        let key_len = self.data[0] as usize;
+        unsafe { &*(self.data[0..1 + key_len].as_ptr() as *const Key) as &Key }
+    }
+
+    pub fn data_size(&self) -> usize {
+        size_of::<u8>() + self.key().len as usize
+    }
+
+    pub fn size(&self) -> usize {
+        size_of::<u32>() + size_of::<u8>() + self.key().len as usize
+    }
+
+    pub fn as_bytes(&self) -> &'a [u8] {
+        unsafe {
+            let ptr = self.header as *const InternalCellHeader as *const u8;
+            core::slice::from_raw_parts(ptr, self.size())
+        }
     }
 
     pub fn new_to_buf<
@@ -283,22 +317,6 @@ impl <'a> InternalCellView<'a> {
         buf_writer.write(&child);
         buf_writer.write_slice(key.as_bytes());
         Ok(())
-    }
-
-    pub fn key(&self) -> &'a Key {
-        let key_len = self.data[0] as usize;
-        unsafe { &*(self.data[0..1 + key_len].as_ptr() as *const Key) as &Key }
-    }
-
-    pub fn size(&self) -> usize {
-        size_of::<u32>() + size_of::<u8>() + self.key().len as usize
-    }
-
-    pub fn as_bytes(&self) -> &'a [u8] {
-        unsafe {
-            let ptr = self.header as *const InternalCellHeader as *const u8;
-            core::slice::from_raw_parts(ptr, self.size())
-        }
     }
 }
 
@@ -390,6 +408,29 @@ impl BtreeLeaf {
         };
     }
 
+    pub fn find_payload_by_key(&self, table: &Table, key: &Key) -> Option<PayloadCellView<'_>> {
+        let offsets = self.get_offsets();
+        let mut l = 0;
+        let mut h = offsets.len();
+
+        while l < h {
+            let m = (l + h) / 2;
+            let cell = PayloadCellView::new(table, &self.data, offsets[m] as usize);
+
+            if cell.key() == key {
+                return Some(cell);
+            }
+
+            if cell.key() < key {
+                l = m + 1;
+            } else {
+                h = m;
+            }
+        }
+
+        return None;
+    }
+
     pub fn read_btree_cells<'a, A: Allocator>(&'a self, table: &Table, allocator: A) -> BtreeCells<'a, A> {
         unsafe {
             let mut cells: BtreeCells<A> = BtreeCells::new_in(allocator);
@@ -399,7 +440,7 @@ impl BtreeLeaf {
             };
 
             for i in offsets.iter() {
-                let payload_cell = PayloadCellView::new(&self.data, *i as usize);
+                let payload_cell = PayloadCellView::new(table, &self.data, *i as usize);
                 let cell = BtreeCell::from_leaf_view(payload_cell, table);
                 cells.push(cell);
             }
@@ -455,10 +496,9 @@ impl BtreeInternal {
 
         while l < h {
             let m = (l + h) / 2;
-            let payload_cell = InternalCellView::new(&self.data, offsets[m] as usize);
-            let cell = BtreeCell::from_internal_view(payload_cell);
+            let cell = InternalCellView::new(&self.data, offsets[m] as usize);
 
-            if cell.key < key {
+            if cell.key() < key {
                 l = m + 1;
             } else {
                 h = m;
@@ -616,10 +656,10 @@ pub fn split_leaf_iter<
     // * cells references leaf_buf
     // * atleast 1 cell reference payload_cell_buf
     // * copy right half to new page which is tmp_buf and write it immediately to storage
-    // * copy the leaf_buf into tmp_buf and copy left half to tmp_buf (don't write it to storage yet)
+    // * copy the leaf_buf into tmp_buf and copy left half to tmp_buf1 (don't write it to storage yet)
     // * copy the promoted_key into tmp_buf2
     // * now I write the tmp_buf1 to storage
-    // * current state: tmp_buf1 has the promoted_key and [payload_cell_buf, leaf_buf, tmp_buf] are free
+    // * current state: tmp_buf1 has the promoted_key and [payload_cell_buf, leaf_buf, tmp_buf1] are free
 
     unsafe {
         let mid = cells.len() / 2;
@@ -670,7 +710,7 @@ pub fn insert_payload_to_leaf<
     allocator: A
 ) -> Result<(), Error<D::Error>> {
     unsafe {
-        let payload_cell = PayloadCellView::new_unsafe(unsafe { payload_cell_buf.as_ptr(0) }, PAGE_SIZE, 0);
+        let payload_cell = PayloadCellView::new_unsafe(table, unsafe { payload_cell_buf.as_ptr(0) }, PAGE_SIZE, 0);
         let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
         let leaf = as_ref!(leaf_buf, BtreeLeaf);
         let mut cells = leaf.read_btree_cells(table, allocator.clone());
@@ -709,7 +749,7 @@ pub fn traverse_to_leaf<
     const MAX_VOLUMES: usize
 >(
     table: &Table,
-    buf: &mut PageBuffer<A>,
+    tmp_buf: &mut PageBuffer<A>,
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     path: &mut Vec<u32, A>
@@ -717,14 +757,42 @@ pub fn traverse_to_leaf<
     unsafe {
         let mut cur_page = table.rows_btree_page;
         loop {
-            let _ = page_rw.read_page(cur_page, buf.as_mut());
-            let btree_page = as_ref!(buf, BtreePage);
+            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
+            let btree_page = as_ref!(tmp_buf, BtreePage);
             if btree_page.node_type == NodeType::Leaf {
                 break;
             }
-            let btree_internal = as_ref!(buf, BtreeInternal);
+            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
             let next_child = btree_internal.next_child_by_key(key);
             path.push(cur_page);
+            cur_page = next_child;
+        }
+
+        return Ok(cur_page);
+    }
+}
+
+pub fn traverse_to_leaf_no_path<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    table: &Table,
+    tmp_buf: &mut PageBuffer<A>,
+    key: &Key,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+) -> Result<u32, TableErr<D::Error>> {
+    unsafe {
+        let mut cur_page = table.rows_btree_page;
+        loop {
+            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
+            let btree_page = as_ref!(tmp_buf, BtreePage);
+            if btree_page.node_type == NodeType::Leaf {
+                break;
+            }
+            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
+            let next_child = btree_internal.next_child_by_key(key);
             cur_page = next_child;
         }
 

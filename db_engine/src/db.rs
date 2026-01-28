@@ -1,12 +1,16 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
-use crate::btree::{BtreeLeaf, PayloadCellView};
-use crate::table::{Table, Column, ColumnType, Flags, TableErr, ToName, Row, Value, Name, SerializedRow};
+use crate::btree::{BtreeLeaf, PayloadCellView, Key};
+use crate::table::{Table, Column, ColumnType, Flags, TableErr, ToName, Name};
 use crate::PageRW;
+use crate::types::PageBufferWriter;
 use crate::types::PageBuffer;
+use crate::overflow::OverflowPage;
 use crate::{PageFreeList, as_ref_mut, as_ref, get_free_page, add_page_to_free_list};
 use allocator_api2::vec::Vec;
+use crate::serde_row;
+use crate::serde_row::{Value, Row};
 
 pub struct Database<'a, D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize, A: Allocator + Clone>
 where
@@ -88,7 +92,7 @@ pub enum Error<E: core::fmt::Debug> {
     Insert(InsertErr),
     TableErr(TableErr<E>),
     FreeListNotFound,
-    HeaderNotFound
+    HeaderNotFound,
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
@@ -163,79 +167,6 @@ where
         Ok(())
     }
 
-    fn serialized_row(&self, table: &Table, row: &Row<'a, A>, allocator: A) -> Result<SerializedRow<A>, InsertErr> {
-        let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
-        let mut null_flags: u64 = 0;
-        let mut i = 0;
-        let mut key: Vec<u8, A> = Vec::new_in(allocator.clone());
-        let mut primary_key_idx: Option<usize> = None;
-
-        while i < row.len() {
-            let col = &table.columns[i];
-            match &row[i] {
-                Value::Null => {
-                    if col.flags.is_set(Flags::Primary) || !col.flags.is_set(Flags::Nullable) {
-                        return Err(InsertErr::CannotBeNull);
-                    }
-                    if col.flags.is_set(Flags::Foreign) {
-                        todo!("foreign key check");
-                    }
-                    null_flags |= 1 << i;
-                },
-                Value::Int(val) => {
-                    if col.col_type != ColumnType::Int {
-                        return Err(InsertErr::TypeDoesNotMatch);
-                    }
-                    if col.flags.is_set(Flags::Foreign) {
-                        todo!("foreign key check");
-                    }
-                    payload.extend_from_slice(&val.to_be_bytes()); 
-                },
-                Value::Float(val) => {
-                    if col.col_type != ColumnType::Float {
-                        return Err(InsertErr::TypeDoesNotMatch);
-                    }
-                    if col.flags.is_set(Flags::Foreign) {
-                        todo!("foreign key check");
-                    }
-                    payload.extend_from_slice(&val.to_be_bytes());
-                },
-                Value::Chars(val) => {
-                    if col.col_type != ColumnType::Chars {
-                        return Err(InsertErr::TypeDoesNotMatch);
-                    }
-                    if col.flags.is_set(Flags::Foreign) {
-                        todo!("foreign key check");
-                    }
-                    let length = val.len() as u8; 
-                    payload.push(length);
-                    payload.extend_from_slice(val);
-                }
-
-            }
-
-            if table.columns[i].flags.is_set(Flags::Primary) {
-                row[i].to_bytes_vec(&mut key);
-                primary_key_idx = Some(i);
-            }
-
-            i += 1;
-        }
-
-        let num_cols = table.col_count;
-        let num_bytes = ((num_cols + 7) / 8) as usize;
-        let all_bytes = null_flags.to_le_bytes();
-        let mut null_flags = Vec::with_capacity_in(num_bytes, allocator.clone());
-        null_flags.extend_from_slice(&all_bytes[..num_bytes]);
-
-        Ok(SerializedRow {
-            key: key,
-            null_flags: null_flags,
-            payload: payload,
-            primary_key_idx: primary_key_idx,
-        })
-    }
-
     pub fn insert_to_table(&mut self, table_page: u32, row: Row<'_, A>, allocator: A) -> Result<(), Error<D::Error>> {
         unsafe {
             let _ = self.page_rw.read_page(table_page, self.table_buf.as_mut())?;
@@ -245,11 +176,9 @@ where
                 return Err(Error::Insert(InsertErr::ColCountDoesNotMatch));
             }
 
-            let serialized_row = self.serialized_row(table, &row, allocator.clone())?;
-            let payload_cell_buf = &mut self.buf2;
-            // println!("serialized_row = {:?}", serialized_row);
+            let serialized_row = serde_row::serialize(table, &row, allocator.clone())?;
             PayloadCellView::new_to_buf(table, &self.page_rw, serialized_row, &mut self.buf2, &mut self.buf3)?;
-            let payload_cell = PayloadCellView::new(self.buf2.as_ref(), 0);
+            let payload_cell = PayloadCellView::new(table, self.buf2.as_ref(), 0);
             let mut path = Vec::new_in(allocator.clone());
             let leaf_page = btree::traverse_to_leaf(table, &mut self.buf3, payload_cell.key(), &self.page_rw, &mut path)?;
             btree::insert_payload_to_leaf(
@@ -264,8 +193,35 @@ where
         Ok(())
     }
 
-    pub fn create_table(&mut self, name: Name, table: &[Column], allocator: A) -> Result<(), Error<D::Error>> {
+    pub fn get_table(&mut self, name: Name, allocator: A) -> Result<u32, Error<D::Error>> {
         unsafe {
+            let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.table_buf.as_mut())?;
+            let table = as_ref!(self.table_buf, Table);
+            let mut buf_writer = PageBufferWriter::new(&mut self.buf1);
+            let len = name.len();
+            buf_writer.write(&(len as u8));
+            buf_writer.write_slice(&name);
+            let key = as_ref!(self.buf1, Key);
+            let _ = btree::traverse_to_leaf_no_path(table, &mut self.buf2, key, &self.page_rw)?;
+            let leaf = as_ref_mut!(self.buf2, BtreeLeaf);
+            let cell = match leaf.find_payload_by_key(table, key) {
+                Some(c) => c,
+                None => return Err(Error::TableErr(TableErr::NotFound))
+            };
+            let mut payload: Vec<u8, A> = Vec::with_capacity_in(cell.header.payload_total_len as usize, allocator.clone());
+            let mut row = Row::new_in(allocator.clone());
+            payload.extend_from_slice(cell.payload(table.get_null_flags_width_bytes()));
+            if cell.header.payload_overflow > 0 {
+                 OverflowPage::read_all(&self.page_rw, cell.header.payload_overflow, &mut payload, &mut self.buf3)?;
+            }
+            serde_row::deserialize(table, &mut row, &mut payload);
+            return Ok(row[1].to_int().unwrap() as u32);
+        }
+    }
+
+    pub fn create_table(&mut self, table: Table, allocator: A) -> Result<(), Error<D::Error>> {
+        unsafe {
+            table.write_to_buf(&mut self.table_buf);
             let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.buf1.as_mut())?;
             let db_cat = as_ref_mut!(self.buf1, Table);
 
@@ -279,9 +235,10 @@ where
             }
             let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
             let mut row = Row::new_in(allocator.clone());
-            row.push(Value::Chars(name.as_ref()));
+            row.push(Value::Chars(&table.name));
             row.push(Value::Int(free_page as i64));
-            self.insert_to_table(2, row, allocator)?;
+            self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
+            self.page_rw.write_page(free_page, self.table_buf.as_ref())?;
         }
         Ok(())
     }
@@ -292,12 +249,18 @@ where
             self.create_new_db(header)?;
         }
 
-        for i in 0..1000 {
+        for i in 0..1 {
             let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
             let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
             let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-            let _ = self.create_table(format!("table_{}", i + 1).to_name(), &[path, size, name], allocator.clone())?;
+            let table = Table::create(format!("table_{}", i + 1).to_name())
+                .add_column(path)?
+                .add_column(size)?
+                .add_column(name)?;
+            let _ = self.create_table(table, allocator.clone())?;
         }
+
+        println!("table = {}", self.get_table("table_5".to_name(), allocator.clone()).unwrap());
         
         Ok(())
     }

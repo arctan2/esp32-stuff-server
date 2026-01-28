@@ -1,12 +1,8 @@
 use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
-use embedded_sdmmc::{BlockDevice, TimeSource};
-use crate::PageRW;
 use crate::types::PageBuffer;
-use crate::btree::{BtreePage, BtreeLeaf, BtreeInternal, Key, KEY_MAX_LEN, NodeType};
-use crate::{get_bit, as_ref};
-use allocator_api2::vec::Vec;
+use crate::{get_bit};
 
 const NAME_MAX_LEN: usize = 32;
 pub type Name = [u8; NAME_MAX_LEN];
@@ -28,7 +24,6 @@ impl ToName for str {
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ColumnType {
-    Null = 0,
     Int = 1,
     Float = 2,
     Chars = 3,
@@ -69,41 +64,10 @@ pub struct Table {
 }
 
 #[derive(Debug)]
-pub enum Value<'a> {
-    Null,
-    Int(i64),
-    Float(f64),
-    Chars(&'a [u8])
-}
-
-pub type Row<'a, A> = allocator_api2::vec::Vec<Value<'a>, A>;
-
-impl<'a> Value<'a> {
-    pub fn to_bytes_vec<A: Allocator + Clone>(&'a self, v: &mut Vec<u8, A>) {
-        match self {
-            Value::Null => {},
-            Value::Int(val) => v.extend_from_slice(&val.to_be_bytes()),
-            Value::Float(val) => v.extend_from_slice(&val.to_be_bytes()),
-            Value::Chars(val) => {
-                let limit = val.len().min(KEY_MAX_LEN);
-                v.extend_from_slice(&val[..limit]);
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct SerializedRow<A: Allocator + Clone> {
-    pub key: Vec<u8, A>,
-    pub null_flags: Vec<u8, A>,
-    pub payload: Vec<u8, A>,
-    pub primary_key_idx: Option<usize>,
-}
-
-#[derive(Debug)]
 pub enum TableErr<E: core::fmt::Debug> {
     SdmmcErr(embedded_sdmmc::Error<E>),
     MaxColumnsReached,
+    NotFound,
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for TableErr<DErr> where DErr: core::fmt::Debug {
@@ -138,6 +102,10 @@ impl Table {
     pub fn get_null_flags_width_bytes(&self) -> usize {
         let s = self.col_count.next_power_of_two() as usize;
         (if s < 8 { 8 } else { s }) / 8
+    }
+
+    pub fn get_columns(&self) -> &[Column] {
+        &self.columns[0..self.col_count as usize]
     }
 }
 

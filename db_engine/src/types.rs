@@ -98,3 +98,28 @@ impl <'a, A: Allocator + Clone> PageBufferWriter<'a, A> {
         self.cur_offset += bytes.len();
     }
 }
+
+pub struct PageBufferReader<'a> {
+    pub buf: &'a [u8],
+    pub cur_offset: usize,
+}
+
+impl<'a> PageBufferReader<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self { buf, cur_offset: 0 }
+    }
+
+    pub fn read<T: Copy>(&mut self) -> T {
+        unsafe {
+            let off = self.cur_offset;
+            self.cur_offset += size_of::<T>();
+            return *(buffer::as_ref::<T>(self.buf, off));
+        }
+    }
+
+    pub fn read_slice(&mut self, len: usize) -> &'a [u8] {
+        let off = self.cur_offset;
+        self.cur_offset += len;
+        return buffer::as_slice(self.buf, off, len);
+    }
+}
