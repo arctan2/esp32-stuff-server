@@ -107,6 +107,9 @@ impl Table {
     pub fn get_columns(&self) -> &[Column] {
         &self.columns[0..self.col_count as usize]
     }
+
+    // pub fn get_record_by_key(&self, key: &Key) {
+    // }
 }
 
 impl Column {

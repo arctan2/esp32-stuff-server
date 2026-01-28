@@ -113,12 +113,106 @@ impl<E> From<InsertErr> for Error<E> where E: core::fmt::Debug {
     }
 }
 
+pub enum Op<'a> {
+    Eq(Value<'a>),
+    Gt(Value<'a>),
+    Lt(Value<'a>),
+    Between(Value<'a>, Value<'a>),
+    StartsWith(Value<'a>),
+    EndsWith(Value<'a>),
+    Contains(Value<'a>),
+    IsNull
+}
 
-impl <'a, D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize, A: Allocator + Clone + core::fmt::Debug>
-Database<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES, A>
+pub struct Operator<'a> {
+    table: u32,
+    column: Name,
+    op: Op<'a>
+}
+
+pub enum Condition<'a> {
+    Is(Operator<'a>),
+    Not(Operator<'a>),
+}
+
+pub enum TopLevelOperator<'a, A: Allocator + Clone> {
+    And(Vec<Condition<'a>, A>),
+    Or(Vec<Condition<'a>, A>)
+}
+
+pub struct Join {
+    left: u32,
+    right: u32,
+    left_col: Name,
+    right_col: Name,
+}
+
+pub struct ColumnName {
+    table: u32,
+    name: Name
+}
+
+pub struct Limit(usize, usize);
+
+pub struct Query<'a, A: Allocator + Clone> {
+    allocator: A,
+    joins: Vec<Join, A>,
+    filters: TopLevelOperator<'a, A>,
+    project: Vec<ColumnName, A>,
+    limit: Option<Limit>,
+}
+
+impl <'a, A> Query<'a, A> where A: Allocator + Clone {
+    pub fn new_empty(allocator: A) -> Self {
+        Self {
+            allocator: allocator.clone(),
+            joins: Vec::new_in(allocator.clone()),
+            filters: TopLevelOperator::And(Vec::new_in(allocator.clone())),
+            project: Vec::new_in(allocator),
+            limit: None
+        }
+    }
+
+    pub fn join(mut self, j: Join) -> Self {
+        self.joins.push(j);
+        self
+    }
+
+    pub fn and_mode(mut self) -> Self {
+        self.filters = TopLevelOperator::And(Vec::new_in(self.allocator.clone()));
+        self
+    }
+
+    pub fn or_mode(mut self) -> Self {
+        self.filters = TopLevelOperator::Or(Vec::new_in(self.allocator.clone()));
+        self
+    }
+
+    pub fn add_filter(mut self, condition: Condition<'a>) -> Self {
+        match self.filters {
+            TopLevelOperator::And(ref mut v) => v.push(condition),
+            TopLevelOperator::Or(ref mut v) => v.push(condition)
+        };
+        self
+    }
+
+    pub fn grab(mut self, p: ColumnName) -> Self {
+        self.project.push(p);
+        self
+    }
+}
+
+impl <
+    'a, D, T, A,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize,
+    
+> Database<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES, A>
 where
     D: BlockDevice,
     T: TimeSource,
+    A: Allocator + Clone + core::fmt::Debug
 {
     pub fn new(file: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, allocator: A) -> Self {
         return Self {
@@ -194,6 +288,12 @@ where
     }
 
     pub fn get_table(&mut self, name: Name, allocator: A) -> Result<u32, Error<D::Error>> {
+        let db_cat_page = FixedPages::DbCat.into();
+        let mut query = Query::new_empty(allocator.clone())
+            .grab(ColumnName{ table: db_cat_page, name: "tbl_name".to_name() })
+            .grab(ColumnName{ table: db_cat_page, name: "page".to_name() })
+            .add_filter(Condition::Is(Operator{ table: db_cat_page, column: "tbl_name".to_name(), op: Op::Eq(Value::Chars(&name)) }));
+
         unsafe {
             let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.table_buf.as_mut())?;
             let table = as_ref!(self.table_buf, Table);
@@ -219,7 +319,7 @@ where
         }
     }
 
-    pub fn create_table(&mut self, table: Table, allocator: A) -> Result<(), Error<D::Error>> {
+    pub fn create_table(&mut self, table: Table, allocator: A) -> Result<u32, Error<D::Error>> {
         unsafe {
             table.write_to_buf(&mut self.table_buf);
             let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.buf1.as_mut())?;
@@ -239,8 +339,8 @@ where
             row.push(Value::Int(free_page as i64));
             self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
             self.page_rw.write_page(free_page, self.table_buf.as_ref())?;
+            Ok(free_page)
         }
-        Ok(())
     }
 
     pub fn init(&mut self, allocator: A) -> Result<(), Error<D::Error>> {
@@ -249,7 +349,7 @@ where
             self.create_new_db(header)?;
         }
 
-        for i in 0..1 {
+        for i in 0..10 {
             let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
             let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
             let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
@@ -257,11 +357,11 @@ where
                 .add_column(path)?
                 .add_column(size)?
                 .add_column(name)?;
-            let _ = self.create_table(table, allocator.clone())?;
+            let table = self.create_table(table, allocator.clone())?;
         }
 
-        println!("table = {}", self.get_table("table_5".to_name(), allocator.clone()).unwrap());
-        
+        let table = self.get_table("table_5".to_name(), allocator.clone()).unwrap();
+
         Ok(())
     }
 }
