@@ -1,7 +1,7 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
-use crate::btree::{BtreeLeaf, PayloadCellView, Key};
+use crate::btree::{BtreeLeaf, PayloadCellView, Key, Cursor};
 use crate::table::{Table, Column, ColumnType, Flags, TableErr, ToName, Name};
 use crate::PageRW;
 use crate::types::PageBufferWriter;
@@ -93,6 +93,7 @@ pub enum Error<E: core::fmt::Debug> {
     TableErr(TableErr<E>),
     FreeListNotFound,
     HeaderNotFound,
+    EndOfRecords
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
@@ -141,10 +142,9 @@ pub enum TopLevelOperator<'a, A: Allocator + Clone> {
 }
 
 pub struct Join {
-    left: u32,
-    right: u32,
-    left_col: Name,
-    right_col: Name,
+    table: u32,
+    from_col: Name,
+    to_col: Name,
 }
 
 pub struct ColumnName {
@@ -156,6 +156,7 @@ pub struct Limit(usize, usize);
 
 pub struct Query<'a, A: Allocator + Clone> {
     allocator: A,
+    target_table: u32,
     joins: Vec<Join, A>,
     filters: TopLevelOperator<'a, A>,
     project: Vec<ColumnName, A>,
@@ -163,13 +164,14 @@ pub struct Query<'a, A: Allocator + Clone> {
 }
 
 impl <'a, A> Query<'a, A> where A: Allocator + Clone {
-    pub fn new_empty(allocator: A) -> Self {
+    pub fn new(target_table: u32, allocator: A) -> Self {
         Self {
             allocator: allocator.clone(),
+            target_table: target_table,
             joins: Vec::new_in(allocator.clone()),
             filters: TopLevelOperator::And(Vec::new_in(allocator.clone())),
             project: Vec::new_in(allocator),
-            limit: None
+            limit: None,
         }
     }
 
@@ -196,9 +198,66 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
         self
     }
 
-    pub fn grab(mut self, p: ColumnName) -> Self {
+    pub fn grab_from_table(mut self, p: ColumnName) -> Self {
         self.project.push(p);
         self
+    }
+
+    pub fn grab(mut self, name: Name) -> Self {
+        self.project.push(ColumnName { table: self.target_table, name: name });
+        self
+    }
+}
+
+pub struct QueryExecutor<'a, A: Allocator + Clone> {
+    table: &'a Table,
+    cursor: Cursor<'a, A>,
+    query: Query<'a, A>
+}
+
+impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
+    pub fn new<
+        D: BlockDevice, T: TimeSource,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        query: Query<'a, A>,
+        table_buf: &'a mut PageBuffer<A>,
+        cursor_buf: &'a mut PageBuffer<A>,
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<QueryExecutor<'a, A>, Error<D::Error>> {
+        let table = unsafe { as_ref!(table_buf, Table) };
+        let cursor = Cursor::new(table, cursor_buf, page_rw)?;
+
+        Ok(Self {
+            table: table,
+            cursor: cursor,
+            query: query
+        })
+    }
+
+    pub fn next<
+        D: BlockDevice, T: TimeSource,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        &mut self,
+        tmp_buf: &mut PageBuffer<A>,
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+        allocator: A
+    ) -> Result<(), Error<D::Error>> {
+        let cell = self.cursor.next(self.table, page_rw)?;
+        let mut payload: Vec<u8, A> = Vec::with_capacity_in(cell.header.payload_total_len as usize, allocator.clone());
+        let mut row = Row::new_in(allocator.clone());
+        payload.extend_from_slice(cell.payload(self.table.get_null_flags_width_bytes()));
+        if cell.header.payload_overflow > 0 {
+             OverflowPage::read_all(page_rw, cell.header.payload_overflow, &mut payload, tmp_buf)?;
+        }
+        serde_row::deserialize(self.table, &mut row, &mut payload);
+        println!("row = {:?}", row);
+        Ok(())
     }
 }
 
@@ -246,16 +305,15 @@ where
             let _ = self.page_rw.write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
         }
         let _ = self.page_rw.extend_file_by_pages(1, self.buf1.as_mut())?;
-        let tbl_name = Column::new("tbl_name".to_name(), ColumnType::Chars, Flags::Primary);
-        let page = Column::new("page".to_name(), ColumnType::Int, Flags::None);
-        Table::create("db_cat".to_name())
-            .add_column(tbl_name)?
-            .add_column(page)?
-            .write_to_buf(&mut self.buf1);
+        let tbl_name = Column::new("tbl_name".to_name(), ColumnType::Chars).primary();
+        let page = Column::new("page".to_name(), ColumnType::Int);
+        self.new_table_begin("db_cat".to_name());
+        self.add_column(tbl_name)?;
+        self.add_column(page)?;
 
         unsafe {
-            let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
-            self.page_rw.write_page(free_page, self.buf1.as_ref())?;
+            let free_page = get_free_page!(&self.page_rw, &mut self.buf1)?;
+            self.page_rw.write_page(free_page, self.table_buf.as_ref())?;
         }
 
         Ok(())
@@ -287,43 +345,59 @@ where
         Ok(())
     }
 
-    pub fn get_table(&mut self, name: Name, allocator: A) -> Result<u32, Error<D::Error>> {
-        let db_cat_page = FixedPages::DbCat.into();
-        let mut query = Query::new_empty(allocator.clone())
-            .grab(ColumnName{ table: db_cat_page, name: "tbl_name".to_name() })
-            .grab(ColumnName{ table: db_cat_page, name: "page".to_name() })
-            .add_filter(Condition::Is(Operator{ table: db_cat_page, column: "tbl_name".to_name(), op: Op::Eq(Value::Chars(&name)) }));
-
-        unsafe {
-            let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.table_buf.as_mut())?;
-            let table = as_ref!(self.table_buf, Table);
-            let mut buf_writer = PageBufferWriter::new(&mut self.buf1);
-            let len = name.len();
-            buf_writer.write(&(len as u8));
-            buf_writer.write_slice(&name);
-            let key = as_ref!(self.buf1, Key);
-            let _ = btree::traverse_to_leaf_no_path(table, &mut self.buf2, key, &self.page_rw)?;
-            let leaf = as_ref_mut!(self.buf2, BtreeLeaf);
-            let cell = match leaf.find_payload_by_key(table, key) {
-                Some(c) => c,
-                None => return Err(Error::TableErr(TableErr::NotFound))
-            };
-            let mut payload: Vec<u8, A> = Vec::with_capacity_in(cell.header.payload_total_len as usize, allocator.clone());
-            let mut row = Row::new_in(allocator.clone());
-            payload.extend_from_slice(cell.payload(table.get_null_flags_width_bytes()));
-            if cell.header.payload_overflow > 0 {
-                 OverflowPage::read_all(&self.page_rw, cell.header.payload_overflow, &mut payload, &mut self.buf3)?;
-            }
-            serde_row::deserialize(table, &mut row, &mut payload);
-            return Ok(row[1].to_int().unwrap() as u32);
+    pub fn get_col_idx(&mut self, table: u32, name: Name) -> Option<u16> {
+        let _ = self.page_rw.read_page(table, self.table_buf.as_mut());
+        let table = unsafe { as_ref!(self.table_buf, Table) };
+        match table.get_col_idx_by_name(name) {
+            Some(v) => Some(v as u16),
+            None => None
         }
     }
 
-    pub fn create_table(&mut self, table: Table, allocator: A) -> Result<u32, Error<D::Error>> {
+    pub fn get_table(&mut self, name: Name, allocator: A) -> Result<u32, Error<D::Error>> {
+        let db_cat_page = FixedPages::DbCat.into();
+        let mut query = Query::new(db_cat_page, allocator.clone())
+            .grab("tbl_name".to_name())
+            .grab("page".to_name())
+            .add_filter(Condition::Is(Operator{ table: db_cat_page, column: "tbl_name".to_name(), op: Op::Eq(Value::Chars(&name)) }));
+
+        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
+
+        while let Ok(cell) = exec.next(&mut self.buf2, &self.page_rw, allocator.clone()) {
+        }
+
+        // unsafe {
+        //     let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.table_buf.as_mut())?;
+        //     let table = as_ref!(self.table_buf, Table);
+        //     let mut buf_writer = PageBufferWriter::new(&mut self.buf1);
+        //     let len = name.len();
+        //     buf_writer.write(&(len as u8));
+        //     buf_writer.write_slice(&name);
+        //     let key = as_ref!(self.buf1, Key);
+        //     let _ = btree::traverse_to_leaf_no_path(table, &mut self.buf2, key, &self.page_rw)?;
+        //     let leaf = as_ref_mut!(self.buf2, BtreeLeaf);
+        //     let cell = match leaf.find_payload_by_key(table, key) {
+        //         Some(c) => c,
+        //         None => return Err(Error::TableErr(TableErr::NotFound))
+        //     };
+        //     let mut payload: Vec<u8, A> = Vec::with_capacity_in(cell.header.payload_total_len as usize, allocator.clone());
+        //     let mut row = Row::new_in(allocator.clone());
+        //     payload.extend_from_slice(cell.payload(table.get_null_flags_width_bytes()));
+        //     if cell.header.payload_overflow > 0 {
+        //          OverflowPage::read_all(&self.page_rw, cell.header.payload_overflow, &mut payload, &mut self.buf3)?;
+        //     }
+        //     serde_row::deserialize(table, &mut row, &mut payload);
+        //     return Ok(row[1].to_int().unwrap() as u32);
+        // }
+
+        Ok(0)
+    }
+
+    pub fn create_table(&mut self, allocator: A) -> Result<u32, Error<D::Error>> {
         unsafe {
-            table.write_to_buf(&mut self.table_buf);
             let _ = self.page_rw.read_page(FixedPages::DbCat.into(), self.buf1.as_mut())?;
             let db_cat = as_ref_mut!(self.buf1, Table);
+            let table = as_ref_mut!(self.table_buf, Table);
 
             if db_cat.rows_btree_page == 0 {
                 let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
@@ -333,14 +407,29 @@ where
                 btree_leaf.init();
                 self.page_rw.write_page(free_page, self.buf2.as_ref())?;
             }
+
             let free_page = get_free_page!(&self.page_rw, &mut self.buf2)?;
+            self.page_rw.write_page(free_page, self.table_buf.as_ref())?;
+
             let mut row = Row::new_in(allocator.clone());
-            row.push(Value::Chars(&table.name));
+            let name = table.name.clone();
+            row.push(Value::Chars(&name));
             row.push(Value::Int(free_page as i64));
             self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
-            self.page_rw.write_page(free_page, self.table_buf.as_ref())?;
+
             Ok(free_page)
         }
+    }
+
+    pub fn new_table_begin(&mut self, name: Name) {
+        self.table_buf.as_mut().fill(0);
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+        table.name = name;
+    }
+
+    pub fn add_column(&mut self, col: Column) -> Result<(), TableErr<D::Error>> {
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+        table.add_column(col)
     }
 
     pub fn init(&mut self, allocator: A) -> Result<(), Error<D::Error>> {
@@ -349,18 +438,21 @@ where
             self.create_new_db(header)?;
         }
 
-        for i in 0..10 {
-            let path = Column::new("path".to_name(), ColumnType::Chars, Flags::Primary);
-            let size = Column::new("size".to_name(), ColumnType::Int, Flags::None);
-            let name = Column::new("name".to_name(), ColumnType::Chars, Flags::None);
-            let table = Table::create(format!("table_{}", i + 1).to_name())
-                .add_column(path)?
-                .add_column(size)?
-                .add_column(name)?;
-            let table = self.create_table(table, allocator.clone())?;
-        }
+        let path = Column::new("path".to_name(), ColumnType::Chars).primary();
+        let size = Column::new("size".to_name(), ColumnType::Int);
+        let name = Column::new("name".to_name(), ColumnType::Chars);
+        self.new_table_begin("files".to_name());
+        self.add_column(path)?;
+        self.add_column(size)?;
+        self.add_column(name)?;
+        let files = self.create_table(allocator.clone())?;
 
-        let table = self.get_table("table_5".to_name(), allocator.clone()).unwrap();
+        let path = Column::new("path".to_name(), ColumnType::Chars).ref_table(files, self.get_col_idx(files, "path".to_name()).unwrap());
+        self.new_table_begin("fav".to_name());
+        self.add_column(path)?;
+        let fav = self.create_table(allocator.clone())?;
+
+        let table = self.get_table("files".to_name(), allocator.clone()).unwrap();
 
         Ok(())
     }

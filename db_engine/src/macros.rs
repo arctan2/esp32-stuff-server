@@ -10,14 +10,14 @@ macro_rules! get_bit {
 #[macro_export]
 macro_rules! set_bit {
     ($t:ty, $val:expr, $bit:expr) => {
-        $val |= $bit as $t
+        ($val as $t) | $bit as $t
     };
 }
 
 #[macro_export]
 macro_rules! clear_bit {
     ($t:ty, $val:expr, $bit:expr) => {
-        $val &= !($bit as $t)
+        ($val as $t) & !($bit as $t)
     };
 }
 

@@ -408,6 +408,15 @@ impl BtreeLeaf {
         };
     }
 
+    pub fn get_payload_cell(&self, table: &Table, idx: usize) -> Option<PayloadCellView<'_>> {
+        let offsets = self.get_offsets();
+        if idx < offsets.len() {
+            Some(PayloadCellView::new(table, &self.data, offsets[idx] as usize))
+        } else {
+            None
+        }
+    }
+
     pub fn find_payload_by_key(&self, table: &Table, key: &Key) -> Option<PayloadCellView<'_>> {
         let offsets = self.get_offsets();
         let mut l = 0;
@@ -792,10 +801,90 @@ pub fn traverse_to_leaf_no_path<
                 break;
             }
             let btree_internal = as_ref!(tmp_buf, BtreeInternal);
-            let next_child = btree_internal.next_child_by_key(key);
-            cur_page = next_child;
+            cur_page = btree_internal.next_child_by_key(key);
         }
 
         return Ok(cur_page);
+    }
+}
+
+pub fn traverse_to_left_most<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    table: &Table,
+    tmp_buf: &mut PageBuffer<A>,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+) -> Result<u32, TableErr<D::Error>> {
+    unsafe {
+        let mut cur_page = table.rows_btree_page;
+        loop {
+            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
+            let btree_page = as_ref!(tmp_buf, BtreePage);
+            if btree_page.node_type == NodeType::Leaf {
+                break;
+            }
+            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
+            cur_page = btree_internal.left_child;
+        }
+
+        return Ok(cur_page);
+    }
+}
+
+pub struct Cursor<'a, A: Allocator + Clone> {
+    page: u32,
+    buf: &'a mut PageBuffer<A>,
+    cur_idx: usize,
+}
+
+impl <'a, A: Allocator + Clone> Cursor<'a, A> {
+    pub fn new<
+        D: BlockDevice, T: TimeSource,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        table: &Table,
+        buf: &'a mut PageBuffer<A>,
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<Self, TableErr<D::Error>> {
+        let left_most_page = traverse_to_left_most(table, buf, page_rw)?;
+
+        Ok(Self {
+            page: left_most_page,
+            buf: buf,
+            cur_idx: 0
+        })
+    }
+
+    pub fn next<
+        D: BlockDevice, T: TimeSource,
+        const MAX_DIRS: usize,
+        const MAX_FILES: usize,
+        const MAX_VOLUMES: usize
+    >(
+        &mut self,
+        table: &Table,
+        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<PayloadCellView<'_>, Error<D::Error>> {
+        let mut leaf = unsafe { as_ref!(self.buf, BtreeLeaf) };
+        if self.cur_idx >= leaf.key_count as usize {
+            if leaf.next_leaf == 0 {
+                return Err(Error::EndOfRecords);
+            }
+            let _ = page_rw.read_page(leaf.next_leaf, self.buf.as_mut())?;
+            leaf = unsafe { as_ref!(self.buf, BtreeLeaf) };
+            self.cur_idx = 0;
+        }
+        let cur_idx = self.cur_idx;
+        self.cur_idx += 1;
+        if let Some(view) = leaf.get_payload_cell(table, cur_idx) {
+            Ok(view)
+        } else {
+            Err(Error::EndOfRecords)
+        }
     }
 }

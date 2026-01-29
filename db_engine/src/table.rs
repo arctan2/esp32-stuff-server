@@ -2,7 +2,7 @@ use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
 use crate::types::PageBuffer;
-use crate::{get_bit};
+use crate::{get_bit, set_bit, clear_bit};
 
 const NAME_MAX_LEN: usize = 32;
 pub type Name = [u8; NAME_MAX_LEN];
@@ -24,6 +24,7 @@ impl ToName for str {
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ColumnType {
+    Null = 0,
     Int = 1,
     Float = 2,
     Chars = 3,
@@ -35,12 +36,20 @@ pub enum Flags {
     None = 0,
     Primary = 1 << 0,
     Nullable = 1 << 1,
-    Foreign = 1 << 2
+    Ref = 1 << 2
 }
 
 impl Flags {
-    pub fn is_set(self, flag: Flags) -> bool {
-        get_bit!(u8, self, flag) == 1
+    pub fn is_set(flags: u8, flag: Flags) -> bool {
+        get_bit!(u8, flags, flag) == 1
+    }
+
+    pub fn set(mut flags: u8, flag: Flags) -> u8 {
+        set_bit!(u8, flags, flag)
+    }
+
+    pub fn clear(mut flags: u8, flag: Flags) -> u8 {
+        clear_bit!(u8, flags, flag)
     }
 }
 
@@ -48,10 +57,10 @@ impl Flags {
 #[derive(Debug, Copy, Clone)]
 pub struct Column {
     pub name: Name,
-    pub flags: Flags,
+    pub flags: u8,
     pub col_type: ColumnType,
-    pub ref_table_page: u32,
-    pub ref_col_idx: u16
+    pub ref_table: u32,
+    pub ref_col: u16
 }
 
 #[derive(Debug)]
@@ -77,26 +86,13 @@ impl<DErr> From<embedded_sdmmc::Error<DErr>> for TableErr<DErr> where DErr: core
 }
 
 impl Table {
-    pub fn create(name: Name) -> Self {
-        Self {
-            name: name,
-            rows_btree_page: 0,
-            col_count: 0,
-            columns: [Column::empty(); 101]
-        }
-    }
-
-    pub fn add_column<E: core::fmt::Debug>(mut self, column: Column) -> Result<Self, TableErr<E>> {
+    pub fn add_column<E: core::fmt::Debug>(&mut self, column: Column) -> Result<(), TableErr<E>> {
         if self.col_count as usize >= NAME_MAX_LEN {
             return Err(TableErr::MaxColumnsReached);
         }
         self.columns[self.col_count as usize] = column;
         self.col_count += 1;
-        return Ok(self);
-    }
-
-    pub fn write_to_buf<A: Allocator + Clone>(&self, buf: &mut PageBuffer<A>) {
-        unsafe { buf.write(0, self); }
+        Ok(())
     }
 
     pub fn get_null_flags_width_bytes(&self) -> usize {
@@ -108,28 +104,53 @@ impl Table {
         &self.columns[0..self.col_count as usize]
     }
 
-    // pub fn get_record_by_key(&self, key: &Key) {
-    // }
+    pub fn get_col_idx_by_name(&self, name: Name) -> Option<usize> {
+        let columns = self.get_columns();
+
+        for (idx, col) in columns.iter().enumerate() {
+            if col.name == name {
+                return Some(idx);
+            }
+        }
+        None
+    }
 }
 
 impl Column {
-    pub fn new(name: Name, col_type: ColumnType, flags: Flags) -> Self {
+    pub fn new(name: Name, col_type: ColumnType) -> Self {
         Self {
             name: name,
-            flags: flags,
+            flags: Flags::None as u8,
             col_type: col_type,
-            ref_table_page: 0,
-            ref_col_idx: 0
+            ref_table: 0,
+            ref_col: 0
         }
+    }
+
+    pub fn nullable(mut self) -> Self {
+        self.flags = Flags::set(self.flags, Flags::Nullable);
+        self
+    }
+
+    pub fn primary(mut self) -> Self {
+        self.flags = Flags::set(self.flags, Flags::Primary);
+        self
+    }
+
+    pub fn ref_table(mut self, ref_table: u32, ref_col: u16) -> Self {
+        self.flags = Flags::set(self.flags, Flags::Primary);
+        self.ref_table = ref_table;
+        self.ref_col = ref_col;
+        self
     }
 
     pub fn empty() -> Self {
         Self {
             name: [0; NAME_MAX_LEN],
-            flags: Flags::None,
+            flags: Flags::None as u8,
             col_type: ColumnType::Int,
-            ref_table_page: 0,
-            ref_col_idx: 0
+            ref_table: 0,
+            ref_col: 0
         }
     }
 }

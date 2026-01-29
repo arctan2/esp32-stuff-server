@@ -63,11 +63,11 @@ pub fn serialize<A: Allocator + Clone>(table: &Table, row: &Row<A>, allocator: A
         let col = &table.columns[i];
         match &row[i] {
             Value::Null => {
-                if col.flags.is_set(Flags::Primary) || !col.flags.is_set(Flags::Nullable) {
+                if Flags::is_set(col.flags, Flags::Primary) || !Flags::is_set(col.flags, Flags::Nullable) {
                     return Err(InsertErr::CannotBeNull);
                 }
-                if col.flags.is_set(Flags::Foreign) {
-                    todo!("foreign key check");
+                if Flags::is_set(col.flags, Flags::Ref) {
+                    todo!("ref key check");
                 }
                 null_flags |= 1 << i;
             },
@@ -75,8 +75,8 @@ pub fn serialize<A: Allocator + Clone>(table: &Table, row: &Row<A>, allocator: A
                 if col.col_type != ColumnType::Int {
                     return Err(InsertErr::TypeDoesNotMatch);
                 }
-                if col.flags.is_set(Flags::Foreign) {
-                    todo!("foreign key check");
+                if Flags::is_set(col.flags, Flags::Ref) {
+                    todo!("ref key check");
                 }
                 payload.extend_from_slice(&val.to_le_bytes()); 
             },
@@ -84,8 +84,8 @@ pub fn serialize<A: Allocator + Clone>(table: &Table, row: &Row<A>, allocator: A
                 if col.col_type != ColumnType::Float {
                     return Err(InsertErr::TypeDoesNotMatch);
                 }
-                if col.flags.is_set(Flags::Foreign) {
-                    todo!("foreign key check");
+                if Flags::is_set(col.flags, Flags::Ref) {
+                    todo!("ref key check");
                 }
                 payload.extend_from_slice(&val.to_le_bytes());
             },
@@ -93,8 +93,8 @@ pub fn serialize<A: Allocator + Clone>(table: &Table, row: &Row<A>, allocator: A
                 if col.col_type != ColumnType::Chars {
                     return Err(InsertErr::TypeDoesNotMatch);
                 }
-                if col.flags.is_set(Flags::Foreign) {
-                    todo!("foreign key check");
+                if Flags::is_set(col.flags, Flags::Ref) {
+                    todo!("ref key check");
                 }
                 let length = val.len() as u8; 
                 payload.push(length);
@@ -103,7 +103,7 @@ pub fn serialize<A: Allocator + Clone>(table: &Table, row: &Row<A>, allocator: A
 
         }
 
-        if table.columns[i].flags.is_set(Flags::Primary) {
+        if Flags::is_set(table.columns[i].flags, Flags::Primary) {
             row[i].to_bytes_vec(&mut key);
         }
 
@@ -146,7 +146,8 @@ pub fn deserialize<'a, A: Allocator + Clone>(
                 let len: u8 = reader.read(); 
                 let chars = reader.read_slice(len as usize);
                 row.push(Value::Chars(chars));
-            }
+            },
+            _ => {}
         }
 
         i += 1;
