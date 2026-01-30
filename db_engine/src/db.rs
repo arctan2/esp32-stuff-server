@@ -76,7 +76,8 @@ pub enum InsertErr {
     CannotBeNull,
     TypeDoesNotMatch,
     CharsTooLong,
-    DuplicateKey
+    DuplicateKey,
+    // RefKeyNotExist,
 }
 
 impl From<FixedPages> for u32 {
@@ -92,7 +93,10 @@ pub enum Error<E: core::fmt::Debug> {
     TableErr(TableErr<E>),
     FreeListNotFound,
     HeaderNotFound,
-    EndOfRecords
+    EndOfRecords,
+    ColumnNotFound,
+    InvalidOperands,
+    MissingOperands
 }
 
 impl<DErr> From<embedded_sdmmc::Error<DErr>> for Error<DErr> where DErr: core::fmt::Debug {
@@ -113,44 +117,85 @@ impl<E> From<InsertErr> for Error<E> where E: core::fmt::Debug {
     }
 }
 
-#[derive(Debug)]
-pub enum Op<'a> {
-    Eq(Value<'a>),
-    Gt(Value<'a>),
-    Lt(Value<'a>),
-    Between(Value<'a>, Value<'a>),
-    StartsWith(Value<'a>),
-    EndsWith(Value<'a>),
-    Contains(Value<'a>),
+#[derive(Debug, PartialEq)]
+pub enum Operator {
+    Eq,
+    Gt,
+    Lt,
+    StartsWith,
+    EndsWith,
+    Contains,
     IsNull
 }
 
-impl <'a> Op<'a> {
-    fn eval(&self, val: &Value<'a>) -> bool {
+impl Operator {
+    fn eval<'a>(&self, lhs: &Value<'a>, rhs: &Value<'a>) -> bool {
         match self {
-            Op::Eq(v) => v.eq(val),
-            Op::Gt(v) => v.gt(val),
-            Op::Lt(v) => v.lt(val),
-            Op::Between(l, r) => l.lt(val) && val.lt(r),
-            Op::StartsWith(v) => v.starts_with(val),
-            Op::EndsWith(v) => v.ends_with(val),
-            Op::Contains(v) => v.contains(val),
-            Op::IsNull => val.is_null()
+            Operator::Eq => lhs.eq(rhs),
+            Operator::Gt => lhs.gt(rhs),
+            Operator::Lt => lhs.lt(rhs),
+            Operator::StartsWith => lhs.starts_with(rhs),
+            Operator::EndsWith => lhs.ends_with(rhs),
+            Operator::Contains => lhs.contains(rhs),
+            Operator::IsNull => lhs.is_null()
         }
     }
 }
 
 #[derive(Debug)]
-pub struct Operator<'a> {
+pub enum Expr<'a> {
+    Val(Value<'a>),
+    // Col(ColumnName) // later (hopefully) when I decide to do joins and stuff this will be used
+    Col(Name)
+}
+
+#[derive(Debug)]
+pub struct ColumnName {
     table: u32,
-    column: Name,
-    op: Op<'a>
+    name: Name
+}
+
+#[derive(Debug)]
+pub struct Op<'a> {
+    lhs: Expr<'a>,
+    op: Operator,
+    rhs: Option<Expr<'a>>,
+}
+
+impl <'a> Op<'a> {
+    pub fn eq(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::Eq, rhs: Some(rhs) }
+    }
+
+    pub fn gt(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::Gt, rhs: Some(rhs) }
+    }
+
+    pub fn lt(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::Lt, rhs: Some(rhs) }
+    }
+
+    pub fn starts_with(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::StartsWith, rhs: Some(rhs) }
+    }
+
+    pub fn ends_with(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::EndsWith, rhs: Some(rhs) }
+    }
+
+    pub fn contains(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::Contains, rhs: Some(rhs) }
+    }
+
+    pub fn is_null(lhs: Expr<'a>) -> Self {
+        Self { lhs, op: Operator::IsNull, rhs: None }
+    }
 }
 
 #[derive(Debug)]
 pub enum Condition<'a> {
-    Is(Operator<'a>),
-    Not(Operator<'a>),
+    Is(Op<'a>),
+    Not(Op<'a>),
 }
 
 pub enum TopLevelOperator<'a, A: Allocator + Clone> {
@@ -158,25 +203,14 @@ pub enum TopLevelOperator<'a, A: Allocator + Clone> {
     Or(Vec<Condition<'a>, A>)
 }
 
-pub struct Join {
-    table: u32,
-    from_col: Name,
-    to_col: Name,
-}
-
-pub struct ColumnName {
-    table: u32,
-    name: Name
-}
-
 pub struct Limit(usize, usize);
 
 pub struct Query<'a, A: Allocator + Clone> {
     allocator: A,
     target_table: u32,
-    joins: Vec<Join, A>,
+    // tables: Vec<u32, A>,
     filters: TopLevelOperator<'a, A>,
-    project: Vec<ColumnName, A>,
+    // project: Vec<ColumnName, A>,
     limit: Option<Limit>,
 }
 
@@ -185,16 +219,10 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
         Self {
             allocator: allocator.clone(),
             target_table: target_table,
-            joins: Vec::new_in(allocator.clone()),
             filters: TopLevelOperator::And(Vec::new_in(allocator.clone())),
-            project: Vec::new_in(allocator),
+            // key: None,
             limit: None,
         }
-    }
-
-    pub fn join(mut self, table: u32, from_col: Name, to_col: Name) -> Self {
-        self.joins.push(Join{ table: table, from_col: from_col, to_col: to_col });
-        self
     }
 
     pub fn and(mut self) -> Self {
@@ -207,31 +235,36 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
         self
     }
 
-    pub fn not(mut self, operator: Operator<'a>) -> Self {
+    pub fn not(mut self, op: Op<'a>) -> Self {
         match self.filters {
-            TopLevelOperator::And(ref mut v) => v.push(Condition::Not(operator)),
-            TopLevelOperator::Or(ref mut v) => v.push(Condition::Not(operator))
+            TopLevelOperator::And(ref mut v) => v.push(Condition::Not(op)),
+            TopLevelOperator::Or(ref mut v) => v.push(Condition::Not(op))
         };
         self
     }
 
-    pub fn is(mut self, operator: Operator<'a>) -> Self {
+    pub fn is(mut self, op: Op<'a>) -> Self {
         match self.filters {
-            TopLevelOperator::And(ref mut v) => v.push(Condition::Is(operator)),
-            TopLevelOperator::Or(ref mut v) => v.push(Condition::Is(operator))
+            TopLevelOperator::And(ref mut v) => v.push(Condition::Is(op)),
+            TopLevelOperator::Or(ref mut v) => v.push(Condition::Is(op))
         };
         self
     }
 
-    pub fn grab_from_table(mut self, table: u32, name: Name) -> Self {
-        self.project.push(ColumnName{ table: table, name: name });
-        self
-    }
+    // pub fn key(mut self, name: Name) -> Self {
+    //     self.project.push(ColumnName { table: self.target_table, name: name });
+    //     self
+    // }
 
-    pub fn grab(mut self, name: Name) -> Self {
-        self.project.push(ColumnName { table: self.target_table, name: name });
-        self
-    }
+    // pub fn grab_from_table(mut self, table: u32, name: Name) -> Self {
+    //     self.project.push(ColumnName{ table: table, name: name });
+    //     self
+    // }
+
+    // pub fn grab(mut self, name: Name) -> Self {
+    //     self.project.push(ColumnName { table: self.target_table, name: name });
+    //     self
+    // }
 }
 
 pub struct QueryExecutor<'a, A: Allocator + Clone> {
@@ -263,6 +296,36 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
         })
     }
 
+    fn load_col<'b, E: core::fmt::Debug>(
+        table: &Table,
+        row: &'b [Value],
+        col: &Name,
+    ) -> Result<&'b Value<'b>, Error<E>> {
+        let idx = table
+            .get_col_idx_by_name_ref(col)
+            .ok_or(Error::ColumnNotFound)?;
+        Ok(&row[idx])
+    }
+
+    fn eval_operator<'b, E: core::fmt::Debug>(
+        operator: &Op,
+        table: &Table,
+        row: &'b [Value],
+    ) -> Result<bool, Error<E>> {
+        match (&operator.lhs, &operator.rhs) {
+            (Expr::Col(col), Some(Expr::Val(val))) => {
+                let lhs = Self::load_col(table, row, col)?;
+                Ok(operator.op.eval(lhs, val))
+            },
+            (Expr::Col(col), None) if operator.op == Operator::IsNull => {
+                let lhs = Self::load_col(table, row, col)?;
+                Ok(operator.op.eval(lhs, lhs))
+            },
+            (_, None) => Err(Error::MissingOperands),
+            _ => Err(Error::InvalidOperands),
+        }
+    }
+
     pub fn next<
         D: BlockDevice, T: TimeSource,
         const MAX_DIRS: usize,
@@ -277,6 +340,7 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
     ) -> Result<(), Error<D::Error>> {
         let _ = page_rw.read_page(self.query.target_table, self.table_buf.as_mut())?;
         let target_table = unsafe { as_ref!(self.table_buf, Table) };
+
         'outter: loop {
             row.clear();
             let payload: &mut Vec<u8, A> = unsafe { core::mem::transmute(&mut *payload) };
@@ -288,36 +352,25 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
             if cell.header.payload_overflow > 0 {
                  OverflowPage::read_all(page_rw, cell.header.payload_overflow, payload, tmp_buf)?;
             }
-            let long_lived_payload: &'a mut allocator_api2::vec::Vec<u8, A> = unsafe { 
-                core::mem::transmute(payload) 
-            };
 
-            serde_row::deserialize(target_table, row, long_lived_payload);
-
-            let cur_table_page = self.query.target_table;
-            let _ = page_rw.read_page(cur_table_page, tmp_buf.as_mut());
-            let table = unsafe { as_ref!(tmp_buf, Table) };
+            serde_row::deserialize(target_table, row, &payload.as_slice()[0..]);
 
             match &self.query.filters {
                 TopLevelOperator::And(conditions) => {
                     for condition in conditions.iter() {
-                        match condition {
-                            Condition::Is(operator) => {
-                                if cur_table_page == operator.table {
-                                    let op = &operator.op;
-                                    if !op.eval(&row[table.get_col_idx_by_name_ref(&operator.column).unwrap()]) {
-                                        continue 'outter;
-                                    }
-                                }
-                            },
-                            Condition::Not(operator) => {
-                                if cur_table_page == operator.table {
-                                    let op = &operator.op;
-                                    if op.eval(&row[table.get_col_idx_by_name_ref(&operator.column).unwrap()]) {
-                                        continue 'outter;
-                                    }
-                                }
-                            }
+                        let (operator, negate) = match condition {
+                            Condition::Is(op) => (op, false),
+                            Condition::Not(op) => (op, true),
+                        };
+
+                        let mut result = Self::eval_operator(operator, target_table, row)?;
+
+                        if negate {
+                            result = !result;
+                        }
+
+                        if !result {
+                            continue 'outter;
                         }
                     }
 
@@ -325,23 +378,19 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
                 },
                 TopLevelOperator::Or(conditions) => {
                     for condition in conditions.iter() {
-                        match condition {
-                            Condition::Is(operator) => {
-                                if cur_table_page == operator.table {
-                                    let op = &operator.op;
-                                    if op.eval(&row[table.get_col_idx_by_name_ref(&operator.column).unwrap()]) {
-                                        return Ok(());
-                                    }
-                                }
-                            },
-                            Condition::Not(operator) => {
-                                if cur_table_page == operator.table {
-                                    let op = &operator.op;
-                                    if !op.eval(&row[table.get_col_idx_by_name_ref(&operator.column).unwrap()]) {
-                                        return Ok(());
-                                    }
-                                }
-                            }
+                        let (operator, negate) = match condition {
+                            Condition::Is(op) => (op, false),
+                            Condition::Not(op) => (op, true),
+                        };
+
+                        let mut result = Self::eval_operator(operator, target_table, row)?;
+
+                        if negate {
+                            result = !result;
+                        }
+
+                        if result {
+                            return Ok(());
                         }
                     }
                 },
@@ -426,11 +475,18 @@ where
                 self.page_rw.write_page(free_page, self.buf1.as_ref())?;
             }
 
-            let serialized_row = serde_row::serialize(table, &row, allocator.clone())?;
+            let serialized_row = serde_row::serialize(
+                table, &row,
+                &mut self.buf1,
+                &mut self.buf2,
+                &mut self.buf3,
+                &self.page_rw, allocator.clone()
+            )?;
+
             PayloadCellView::new_to_buf(table, &self.page_rw, serialized_row, &mut self.buf1, &mut self.buf2)?;
             let payload_cell = PayloadCellView::new(table, self.buf1.as_ref(), 0);
             let mut path = Vec::new_in(allocator.clone());
-            let leaf_page = btree::traverse_to_leaf(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
+            let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
             btree::insert_payload_to_leaf(
                 &mut self.buf1, &mut self.buf2,
                 &mut self.buf3, &mut self.buf4,
@@ -455,9 +511,7 @@ where
     pub fn get_table(&mut self, name: Name, allocator: A) -> Result<u32, Error<D::Error>> {
         let db_cat_page = FixedPages::DbCat.into();
         let query = Query::new(db_cat_page, allocator.clone())
-            .grab("tbl_name".to_name())
-            .grab("page".to_name())
-            .is(Operator{ table: db_cat_page, column: "tbl_name".to_name(), op: Op::Eq(Value::Chars(&name)) });
+            .is(Op::eq(Expr::Col("tbl_name".to_name()), Expr::Val(Value::Chars(&name))));
 
         let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
 
@@ -477,9 +531,7 @@ where
 
     pub fn print_all_table(&mut self, allocator: A) {
         let db_cat_page = FixedPages::DbCat.into();
-        let query = Query::new(db_cat_page, allocator.clone())
-            .grab("tbl_name".to_name())
-            .grab("page".to_name());
+        let query = Query::new(db_cat_page, allocator.clone());
 
         let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw).unwrap();
 
@@ -538,7 +590,7 @@ where
 
         {
             let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
-            let path = Column::new("path".to_name(), ColumnType::Chars).ref_table(files, self.get_col_idx(files, "path".to_name()).unwrap());
+            let path = Column::new("cool_path".to_name(), ColumnType::Chars);
             self.new_table_begin("fav".to_name());
             self.add_column(path)?;
             let fav = self.create_table(allocator.clone())?;
@@ -553,10 +605,26 @@ where
             self.insert_to_table(files, row, allocator.clone())?;
         }
 
-        let fav = self.get_table("fav".to_name(), allocator.clone()).unwrap();
-        let mut row = Row::new_in(allocator.clone());
-        row.push(Value::Chars(b"/some/file.txt"));
-        self.insert_to_table(fav, row, allocator.clone())?;
+        {
+            let fav = self.get_table("fav".to_name(), allocator.clone()).unwrap();
+            let mut row = Row::new_in(allocator.clone());
+            row.push(Value::Chars(b"/some/file.txt"));
+            self.insert_to_table(fav, row, allocator.clone())?;
+        }
+
+        {
+            let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
+            let query = Query::new(files, allocator.clone());
+            let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
+            let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
+            let mut row: Row<A> = Row::new_in(allocator.clone());
+            match exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
+                Err(_) => return Err(Error::TableErr(TableErr::NotFound)),
+                _ => ()
+            }
+
+            println!("row = {:?}", row);
+        }
 
         Ok(())
     }

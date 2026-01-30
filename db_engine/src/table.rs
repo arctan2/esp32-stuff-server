@@ -34,7 +34,7 @@ pub enum Flags {
     None = 0,
     Primary = 1 << 0,
     Nullable = 1 << 1,
-    Ref = 1 << 2
+    // Ref = 1 << 2
 }
 
 impl Flags {
@@ -146,12 +146,12 @@ impl Column {
         self
     }
 
-    pub fn ref_table(mut self, ref_table: u32, ref_col: u16) -> Self {
-        self.flags = Flags::Ref as u8;
-        self.ref_table = ref_table;
-        self.ref_col = ref_col;
-        self
-    }
+    // pub fn ref_table(mut self, ref_table: u32, ref_col: u16) -> Self {
+    //     self.flags = Flags::Ref as u8;
+    //     self.ref_table = ref_table;
+    //     self.ref_col = ref_col;
+    //     self
+    // }
 
     pub fn empty() -> Self {
         Self {

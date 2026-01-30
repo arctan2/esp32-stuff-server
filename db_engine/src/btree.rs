@@ -665,8 +665,8 @@ pub fn split_leaf_iter<
     // you have be careful here because everything here is literally the spiderman pointing each other meme
     // * cells references leaf_buf
     // * atleast 1 cell reference payload_cell_buf
-    // * copy right half to new page which is tmp_buf and write it immediately to storage
-    // * copy the leaf_buf into tmp_buf and copy left half to tmp_buf1 (don't write it to storage yet)
+    // * copy right half to new page which is tmp_buf1 and write it immediately to storage
+    // * copy the leaf_buf into tmp_buf1 and copy left half to tmp_buf1 (don't write it to storage yet)
     // * copy the promoted_key into tmp_buf2
     // * now I write the tmp_buf1 to storage
     // * current state: tmp_buf1 has the promoted_key and [payload_cell_buf, leaf_buf, tmp_buf1] are free
@@ -752,7 +752,7 @@ pub fn insert_payload_to_leaf<
     }
 }
 
-pub fn traverse_to_leaf<
+pub fn traverse_to_leaf_with_path<
     'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
     const MAX_DIRS: usize,
     const MAX_FILES: usize,
@@ -782,7 +782,7 @@ pub fn traverse_to_leaf<
     }
 }
 
-pub fn traverse_to_leaf_no_path<
+pub fn traverse_to_leaf<
     'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
     const MAX_DIRS: usize,
     const MAX_FILES: usize,
@@ -807,6 +807,26 @@ pub fn traverse_to_leaf_no_path<
 
         return Ok(cur_page);
     }
+}
+
+pub fn find_by_key<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    table: &Table,
+    tmp_buf: &mut PageBuffer<A>,
+    key: &Key,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+) -> Result<PayloadCellView<'a>, TableErr<D::Error>> {
+    let _ = traverse_to_leaf(table, tmp_buf, key, page_rw);
+    let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
+
+    return match leaf.find_payload_by_key(table, key) {
+        Some(cell) => Ok(cell),
+        None => Err(TableErr::NotFound)
+    };
 }
 
 pub fn traverse_to_left_most<
