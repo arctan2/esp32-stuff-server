@@ -12,6 +12,16 @@ pub enum Value<'a> {
     Chars(&'a [u8])
 }
 
+pub trait Operations<'a> {
+    fn eq(&self, rhs: &Value<'a>) -> bool;
+    fn gt(&self, rhs: &Value<'a>) -> bool;
+    fn lt(&self, rhs: &Value<'a>) -> bool;
+    fn starts_with(&self, rhs: &Value<'a>) -> bool;
+    fn ends_with(&self, rhs: &Value<'a>) -> bool;
+    fn contains(&self, rhs: &Value<'a>) -> bool;
+    fn is_null(&self) -> bool;
+}
+
 impl <'a> Value<'a> {
     pub fn to_int(&self) -> Option<i64> {
         match self {
@@ -25,6 +35,46 @@ impl <'a> Value<'a> {
             Value::Chars(val) => Some(val),
             _ => None
         }
+    }
+}
+
+impl<'a> Operations<'a> for Value<'a> {
+    fn eq(&self, rhs: &Value<'a>) -> bool {
+        match (self, rhs) {
+            (Value::Null, Value::Null) => true,
+            (Value::Int(l), Value::Int(r)) => l == r,
+            (Value::Float(l), Value::Float(r)) => l == r,
+            (Value::Chars(l), Value::Chars(r)) => l == r,
+            _ => false,
+        }
+    }
+
+    fn gt(&self, rhs: &Value<'a>) -> bool {
+        matches!((self, rhs), (Value::Int(l), Value::Int(r)) if l > r) ||
+        matches!((self, rhs), (Value::Float(l), Value::Float(r)) if l > r) ||
+        matches!((self, rhs), (Value::Chars(l), Value::Chars(r)) if l > r)
+    }
+
+    fn lt(&self, rhs: &Value<'a>) -> bool {
+        matches!((self, rhs), (Value::Int(l), Value::Int(r)) if l < r) ||
+        matches!((self, rhs), (Value::Float(l), Value::Float(r)) if l < r) ||
+        matches!((self, rhs), (Value::Chars(l), Value::Chars(r)) if l < r)
+    }
+
+    fn starts_with(&self, rhs: &Value<'a>) -> bool {
+        matches!((self, rhs), (Value::Chars(l), Value::Chars(r)) if l.starts_with(r))
+    }
+
+    fn ends_with(&self, rhs: &Value<'a>) -> bool {
+        matches!((self, rhs), (Value::Chars(l), Value::Chars(r)) if l.ends_with(r))
+    }
+    
+    fn contains(&self, rhs: &Value<'a>) -> bool {
+        matches!((self, rhs), (Value::Chars(l), Value::Chars(r)) if l.windows(r.len()).any(|w| w == *r))
+    }
+
+    fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
     }
 }
 

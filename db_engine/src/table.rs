@@ -1,7 +1,5 @@
-use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
-use crate::types::PageBuffer;
 use crate::{get_bit, set_bit, clear_bit};
 
 const NAME_MAX_LEN: usize = 32;
@@ -114,6 +112,17 @@ impl Table {
         }
         None
     }
+
+    pub fn get_col_idx_by_name_ref(&self, name: &Name) -> Option<usize> {
+        let columns = self.get_columns();
+
+        for (idx, col) in columns.iter().enumerate() {
+            if col.name == *name {
+                return Some(idx);
+            }
+        }
+        None
+    }
 }
 
 impl Column {
@@ -128,17 +137,17 @@ impl Column {
     }
 
     pub fn nullable(mut self) -> Self {
-        self.flags = Flags::set(self.flags, Flags::Nullable);
+        self.flags = Flags::Nullable as u8;
         self
     }
 
     pub fn primary(mut self) -> Self {
-        self.flags = Flags::set(self.flags, Flags::Primary);
+        self.flags = Flags::Primary as u8;
         self
     }
 
     pub fn ref_table(mut self, ref_table: u32, ref_col: u16) -> Self {
-        self.flags = Flags::set(self.flags, Flags::Primary);
+        self.flags = Flags::Ref as u8;
         self.ref_table = ref_table;
         self.ref_col = ref_col;
         self

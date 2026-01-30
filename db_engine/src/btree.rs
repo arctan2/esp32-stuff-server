@@ -61,6 +61,7 @@ pub const MAX_INLINE_LEN: usize = 255;
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(u8)]
 pub enum NodeType {
+    None = 0,
     Internal = 1,
     Leaf = 2
 }
