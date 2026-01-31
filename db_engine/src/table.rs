@@ -1,5 +1,6 @@
 use core::mem::size_of;
 use crate::page_rw::PAGE_SIZE;
+use crate::db::{Error};
 use crate::{get_bit, set_bit, clear_bit};
 
 const NAME_MAX_LEN: usize = 32;
@@ -42,11 +43,11 @@ impl Flags {
         get_bit!(u8, flags, flag) == 1
     }
 
-    pub fn set(mut flags: u8, flag: Flags) -> u8 {
+    pub fn set(flags: u8, flag: Flags) -> u8 {
         set_bit!(u8, flags, flag)
     }
 
-    pub fn clear(mut flags: u8, flag: Flags) -> u8 {
+    pub fn clear(flags: u8, flag: Flags) -> u8 {
         clear_bit!(u8, flags, flag)
     }
 }
@@ -70,23 +71,10 @@ pub struct Table {
     pub columns: [Column; (PAGE_SIZE - (size_of::<Name>() + (size_of::<u32>() * 2))) / size_of::<Column>()]
 }
 
-#[derive(Debug)]
-pub enum TableErr<E: core::fmt::Debug> {
-    SdmmcErr(embedded_sdmmc::Error<E>),
-    MaxColumnsReached,
-    NotFound,
-}
-
-impl<DErr> From<embedded_sdmmc::Error<DErr>> for TableErr<DErr> where DErr: core::fmt::Debug {
-    fn from(err: embedded_sdmmc::Error<DErr>) -> Self {
-        TableErr::SdmmcErr(err)
-    }
-}
-
 impl Table {
-    pub fn add_column<E: core::fmt::Debug>(&mut self, column: Column) -> Result<(), TableErr<E>> {
+    pub fn add_column<E: core::fmt::Debug>(&mut self, column: Column) -> Result<(), Error<E>> {
         if self.col_count as usize >= NAME_MAX_LEN {
-            return Err(TableErr::MaxColumnsReached);
+            return Err(Error::MaxColumnsReached);
         }
         self.columns[self.col_count as usize] = column;
         self.col_count += 1;

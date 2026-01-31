@@ -6,10 +6,10 @@ use crate::types::{PageBuffer, PageBufferWriter, PageBufferReader};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use crate::{as_ref, as_ref_mut, PageRW, get_free_page, PageFreeList};
-use crate::table::{Table, TableErr};
+use crate::table::{Table};
 use crate::serde_row::{Value, SerializedRow};
 use crate::overflow::OverflowPage;
-use crate::db::{Error, InsertErr};
+use crate::db::{Error};
 use crate::buffer;
 use embedded_sdmmc::{BlockDevice, TimeSource};
 
@@ -247,7 +247,6 @@ impl <'a> PayloadCellView<'a> {
         overflow_buf: &mut PageBuffer<A>,
     ) -> Result<(), Error<D::Error>> {
         let mut buf_writer = PageBufferWriter::new(buf);
-        let key_len: u8 = row.key.len() as u8;
         let payload_len: u32 = row.payload.len() as u32;
         let mut inline_len: u32 = payload_len;
         let overflow_bytes_len: u32 = if (payload_len as usize) > MAX_INLINE_LEN {
@@ -265,7 +264,6 @@ impl <'a> PayloadCellView<'a> {
 
         buf_writer.write(&payload_overflow_page);
         buf_writer.write(&(inline_len as u8));
-        buf_writer.write(&key_len);
         buf_writer.write_slice(&row.key);
         buf_writer.write_slice(&row.null_flags);
         buf_writer.write_slice(&row.payload[0..(inline_len as usize)]);
@@ -726,7 +724,7 @@ pub fn insert_payload_to_leaf<
         let mut cells = leaf.read_btree_cells(table, allocator.clone());
 
         if let Some(_) = cells.binary_search_by_key(payload_cell.key()) {
-            return Err(Error::Insert(InsertErr::DuplicateKey));
+            return Err(Error::DuplicateKey);
         }
 
         cells.push(BtreeCell::from_leaf_view(payload_cell, table));
@@ -763,7 +761,7 @@ pub fn traverse_to_leaf_with_path<
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     path: &mut Vec<u32, A>
-) -> Result<u32, TableErr<D::Error>> {
+) -> Result<u32, Error<D::Error>> {
     unsafe {
         let mut cur_page = table.rows_btree_page;
         loop {
@@ -792,7 +790,7 @@ pub fn traverse_to_leaf<
     tmp_buf: &mut PageBuffer<A>,
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<u32, TableErr<D::Error>> {
+) -> Result<u32, Error<D::Error>> {
     unsafe {
         let mut cur_page = table.rows_btree_page;
         loop {
@@ -819,13 +817,13 @@ pub fn find_by_key<
     tmp_buf: &mut PageBuffer<A>,
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<PayloadCellView<'a>, TableErr<D::Error>> {
+) -> Result<PayloadCellView<'a>, Error<D::Error>> {
     let _ = traverse_to_leaf(table, tmp_buf, key, page_rw);
     let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
 
     return match leaf.find_payload_by_key(table, key) {
         Some(cell) => Ok(cell),
-        None => Err(TableErr::NotFound)
+        None => Err(Error::NotFound)
     };
 }
 
@@ -838,7 +836,7 @@ pub fn traverse_to_left_most<
     table: &Table,
     tmp_buf: &mut PageBuffer<A>,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<u32, TableErr<D::Error>> {
+) -> Result<u32, Error<D::Error>> {
     unsafe {
         let mut cur_page = table.rows_btree_page;
         loop {
@@ -871,7 +869,7 @@ impl <'a, A: Allocator + Clone> Cursor<'a, A> {
         table: &Table,
         buf: &'a mut PageBuffer<A>,
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<Self, TableErr<D::Error>> {
+    ) -> Result<Self, Error<D::Error>> {
         let left_most_page = traverse_to_left_most(table, buf, page_rw)?;
 
         Ok(Self {

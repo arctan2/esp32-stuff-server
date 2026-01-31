@@ -1,12 +1,10 @@
 use allocator_api2::alloc::Allocator;
 use crate::types::{PageBufferReader, PageBufferWriter, PageBuffer};
 use allocator_api2::vec::Vec;
-use crate::btree::{find_by_key, Key, PayloadCellView};
-use crate::{PageRW, as_ref};
-use crate::btree;
-use embedded_sdmmc::{BlockDevice, TimeSource};
-use crate::table::{Table, ColumnType, Flags, TableErr};
-use crate::db::{InsertErr, Error};
+use crate::btree::{Key};
+use crate::{as_ref};
+use crate::table::{Table, ColumnType, Flags};
+use crate::db::{Error};
 
 #[derive(Debug)]
 pub enum Value<'a> {
@@ -87,13 +85,20 @@ pub const CHARS_MAX_LEN: usize = 255;
 pub type Row<'a, A> = allocator_api2::vec::Vec<Value<'a>, A>;
 
 impl<'a> Value<'a> {
-    pub fn to_bytes_vec<A: Allocator + Clone>(&'a self, v: &mut Vec<u8, A>) {
+    pub fn to_key_vec<A: Allocator + Clone>(&'a self, v: &mut Vec<u8, A>) {
         match self {
             Value::Null => {},
-            Value::Int(val) => v.extend_from_slice(&val.to_le_bytes()),
-            Value::Float(val) => v.extend_from_slice(&val.to_le_bytes()),
+            Value::Int(val) => {
+                v.push(size_of::<i64>() as u8);
+                v.extend_from_slice(&val.to_le_bytes())
+            },
+            Value::Float(val) => {
+                v.push(size_of::<f64>() as u8);
+                v.extend_from_slice(&val.to_le_bytes())
+            },
             Value::Chars(val) => {
                 let limit = val.len().min(CHARS_MAX_LEN);
+                v.push(limit as u8);
                 v.extend_from_slice(&val[..limit]);
             }
         }
@@ -140,7 +145,7 @@ impl<'a> Value<'a> {
 //     tmp_buf3: &mut PageBuffer<A>,
 //     val: &Value<'a>,
 //     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-// ) -> Result<PayloadCellView<'a>, TableErr<D::Error>> {
+// ) -> Result<PayloadCellView<'a>, Error<D::Error>> {
 //     let key = val.to_key(tmp_buf1);
 //     let _ = page_rw.read_page(table_page, tmp_buf2.as_mut());
 //     let ref_table = unsafe { as_ref!(tmp_buf2, Table) };
@@ -154,20 +159,15 @@ pub struct SerializedRow<A: Allocator + Clone> {
     pub payload: Vec<u8, A>,
 }
 
-pub fn serialize<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn serialize<'a, E: core::fmt::Debug, A: Allocator + Clone>(
     table: &Table,
     row: &Row<A>,
-    tmp_buf1: &mut PageBuffer<A>,
-    tmp_buf2: &mut PageBuffer<A>,
-    tmp_buf3: &mut PageBuffer<A>,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    // tmp_buf1: &mut PageBuffer<A>,
+    // tmp_buf2: &mut PageBuffer<A>,
+    // tmp_buf3: &mut PageBuffer<A>,
+    // page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     allocator: A
-) -> Result<SerializedRow<A>, Error<D::Error>> {
+) -> Result<SerializedRow<A>, Error<E>> {
     let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
     let mut null_flags: u64 = 0;
     let mut i = 0;
@@ -178,11 +178,11 @@ pub fn serialize<
         match &row[i] {
             Value::Null => {
                 if Flags::is_set(col.flags, Flags::Primary) || !Flags::is_set(col.flags, Flags::Nullable) {
-                    return Err(InsertErr::CannotBeNull.into());
+                    return Err(Error::CannotBeNull);
                 }
                 // if Flags::is_set(col.flags, Flags::Ref) {
                 //     match get_ref_cell_view_by_value(col.ref_table, tmp_buf1, tmp_buf2, tmp_buf3, &row[i], page_rw) {
-                //         Err(TableErr::NotFound) => return Err(InsertErr::RefKeyNotExist.into()),
+                //         Err(Error::NotFound) => return Err(Error::RefKeyNotExist),
                 //         Err(e) => return Err(e.into()),
                 //         Ok(_) => ()
                 //     }
@@ -191,11 +191,11 @@ pub fn serialize<
             },
             Value::Int(val) => {
                 if col.col_type != ColumnType::Int {
-                    return Err(InsertErr::TypeDoesNotMatch.into());
+                    return Err(Error::TypeDoesNotMatch);
                 }
                 // if Flags::is_set(col.flags, Flags::Ref) {
                 //     match get_ref_cell_view_by_value(col.ref_table, tmp_buf1, tmp_buf2, tmp_buf3, &row[i], page_rw) {
-                //         Err(TableErr::NotFound) => return Err(InsertErr::RefKeyNotExist.into()),
+                //         Err(Error::NotFound) => return Err(Error::RefKeyNotExist),
                 //         Err(e) => return Err(e.into()),
                 //         Ok(_) => ()
                 //     }
@@ -204,11 +204,11 @@ pub fn serialize<
             },
             Value::Float(val) => {
                 if col.col_type != ColumnType::Float {
-                    return Err(InsertErr::TypeDoesNotMatch.into());
+                    return Err(Error::TypeDoesNotMatch);
                 }
                 // if Flags::is_set(col.flags, Flags::Ref) {
                 //     match get_ref_cell_view_by_value(col.ref_table, tmp_buf1, tmp_buf2, tmp_buf3, &row[i], page_rw) {
-                //         Err(TableErr::NotFound) => return Err(InsertErr::RefKeyNotExist.into()),
+                //         Err(Error::NotFound) => return Err(Error::RefKeyNotExist),
                 //         Err(e) => return Err(e.into()),
                 //         Ok(_) => ()
                 //     }
@@ -217,12 +217,12 @@ pub fn serialize<
             },
             Value::Chars(val) => {
                 if col.col_type != ColumnType::Chars {
-                    return Err(InsertErr::TypeDoesNotMatch.into());
+                    return Err(Error::TypeDoesNotMatch);
                 }
 
                 // if Flags::is_set(col.flags, Flags::Ref) {
                 //     match get_ref_cell_view_by_value(col.ref_table, tmp_buf1, tmp_buf2, tmp_buf3, &row[i], page_rw) {
-                //         Err(TableErr::NotFound) => return Err(InsertErr::RefKeyNotExist.into()),
+                //         Err(Error::NotFound) => return Err(Error::RefKeyNotExist),
                 //         Err(e) => return Err(e.into()),
                 //         Ok(_) => ()
                 //     }
@@ -236,7 +236,7 @@ pub fn serialize<
         }
 
         if Flags::is_set(table.columns[i].flags, Flags::Primary) {
-            row[i].to_bytes_vec(&mut key);
+            row[i].to_key_vec(&mut key);
         }
 
         i += 1;
