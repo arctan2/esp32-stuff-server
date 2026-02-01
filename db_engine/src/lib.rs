@@ -9,6 +9,7 @@ mod overflow;
 mod buffer;
 mod serde_row;
 mod query;
+mod wal;
 
 pub use page_rw::PageRW;
 pub use page_free_list::PageFreeList;

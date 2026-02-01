@@ -19,8 +19,7 @@ async fn main() {
     let root_dir = volume.open_root_dir().unwrap();
     let _ = root_dir.make_dir_in_dir("STUFF").unwrap();
     let stuff_dir = root_dir.open_dir("STUFF").unwrap();
-    let db_file = stuff_dir.open_file_in_dir("DB", embedded_sdmmc::Mode::ReadWriteCreateOrAppend).unwrap();
-    let mut db = db_engine::db::Database::new(db_file, esp_alloc::ExternalMemory);
+    let mut db = db_engine::db::Database::new(&stuff_dir, "DB", esp_alloc::ExternalMemory).unwrap();
     db.init(esp_alloc::ExternalMemory).unwrap();
 }
 

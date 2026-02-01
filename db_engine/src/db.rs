@@ -1,4 +1,4 @@
-use embedded_sdmmc::{File, BlockDevice, TimeSource};
+use embedded_sdmmc::{File, Directory, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
 use crate::btree::{BtreeLeaf, PayloadCellView, Key};
@@ -10,12 +10,14 @@ use allocator_api2::vec::Vec;
 use crate::serde_row;
 use crate::serde_row::{Value, Row};
 use crate::query::{Query, QueryExecutor};
+use crate::wal::{WalHandler};
 
 pub struct Database<'a, D, T, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize, A: Allocator + Clone>
 where
     D: BlockDevice,
     T: TimeSource,
 {
+    dir: &'a Directory<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     page_rw: PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     table_buf: PageBuffer<A>,
     buf1: PageBuffer<A>,
@@ -115,15 +117,21 @@ where
     T: TimeSource,
     A: Allocator + Clone + core::fmt::Debug
 {
-    pub fn new(file: File<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, allocator: A) -> Self {
-        return Self {
-            page_rw: PageRW::new(file),
+    pub fn new(
+        dir: &'a Directory<D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+        name: &'static str,
+        allocator: A
+    ) -> Result<Self, Error<D::Error>> {
+        let db_file = dir.open_file_in_dir(name, embedded_sdmmc::Mode::ReadWriteCreateOrAppend)?;
+        Ok(Self {
+            dir: dir,
+            page_rw: PageRW::new(db_file),
             table_buf: PageBuffer::new(allocator.clone()),
             buf1: PageBuffer::new(allocator.clone()),
             buf2: PageBuffer::new(allocator.clone()),
             buf3: PageBuffer::new(allocator.clone()),
             buf4: PageBuffer::new(allocator.clone()),
-        };
+        })
     }
 
     fn get_or_create_header(&mut self) -> Result<DBHeader, Error<D::Error>> {
@@ -184,6 +192,12 @@ where
         let payload_cell = PayloadCellView::new(table, self.buf1.as_ref(), 0);
         let mut path = Vec::new_in(allocator.clone());
         let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
+
+        let mut wal_handler = WalHandler::new(self.dir, &self.page_rw);
+        wal_handler.begin(&mut self.buf2)?;
+        wal_handler.append_pages_vec(&path, &mut self.buf2)?;
+        wal_handler.append_page(leaf_page, &mut self.buf2)?;
+
         btree::insert_payload_to_leaf(
             &mut self.buf1, &mut self.buf2,
             &mut self.buf3, &mut self.buf4,
@@ -192,6 +206,9 @@ where
             allocator.clone()
         )?;
         self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
+
+        wal_handler.end()?;
+
         Ok(())
     }
 
@@ -281,6 +298,9 @@ where
     }
 
     pub fn init(&mut self, allocator: A) -> Result<(), Error<D::Error>> {
+        let mut wal_handler = WalHandler::new(self.dir, &self.page_rw);
+        wal_handler.check_restore_wal(&mut self.buf1);
+
         let header = self.get_or_create_header()?;
         if header.page_count == 0 {
             self.create_new_db(header)?;
