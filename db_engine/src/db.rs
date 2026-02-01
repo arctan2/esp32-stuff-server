@@ -1,7 +1,7 @@
 use embedded_sdmmc::{File, BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
-use crate::btree::{BtreeLeaf, PayloadCellView};
+use crate::btree::{BtreeLeaf, PayloadCellView, Key};
 use crate::table::{Table, Column, ColumnType, ToName, Name};
 use crate::PageRW;
 use crate::types::PageBuffer;
@@ -89,7 +89,9 @@ pub enum Error<E: core::fmt::Debug> {
     //table errors
     MaxColumnsReached,
     NotFound,
+    TableEmpty,
     //insert errors
+    MissingPrimaryKey,
     ColCountDoesNotMatch,
     CannotBeNull,
     TypeDoesNotMatch,
@@ -162,38 +164,60 @@ where
     }
 
     pub fn insert_to_table(&mut self, table_page: u32, row: Row<'_, A>, allocator: A) -> Result<(), Error<D::Error>> {
-        unsafe {
-            let _ = self.page_rw.read_page(table_page, self.table_buf.as_mut())?;
-            let table = as_ref_mut!(self.table_buf, Table);
+        let _ = self.page_rw.read_page(table_page, self.table_buf.as_mut())?;
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) }; 
 
-            if table.col_count as usize != row.len() {
-                return Err(Error::ColCountDoesNotMatch);
-            }
-
-            if table.rows_btree_page == 0 {
-                let free_page = get_free_page!(&self.page_rw, &mut self.buf1)?;
-                table.rows_btree_page = free_page;
-                self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
-                let btree_leaf = as_ref_mut!(self.buf1, BtreeLeaf);
-                btree_leaf.init();
-                self.page_rw.write_page(free_page, self.buf1.as_ref())?;
-            }
-
-            let serialized_row = serde_row::serialize(table, &row, allocator.clone())?;
-
-            PayloadCellView::new_to_buf(table, &self.page_rw, serialized_row, &mut self.buf1, &mut self.buf2)?;
-            let payload_cell = PayloadCellView::new(table, self.buf1.as_ref(), 0);
-            let mut path = Vec::new_in(allocator.clone());
-            let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
-            btree::insert_payload_to_leaf(
-                &mut self.buf1, &mut self.buf2,
-                &mut self.buf3, &mut self.buf4,
-                leaf_page, table,
-                &self.page_rw, path,
-                allocator.clone()
-            )?;
-            self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
+        if table.col_count as usize != row.len() {
+            return Err(Error::ColCountDoesNotMatch);
         }
+
+        if table.rows_btree_page == 0 {
+            let free_page = unsafe { get_free_page!(&self.page_rw, &mut self.buf1)? };
+            table.rows_btree_page = free_page;
+            self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
+            let btree_leaf = unsafe { as_ref_mut!(self.buf1, BtreeLeaf) }; 
+            btree_leaf.init();
+            self.page_rw.write_page(free_page, self.buf1.as_ref())?;
+        }
+
+        let serialized_row = serde_row::serialize(table, &row, allocator.clone())?;
+
+        PayloadCellView::new_to_buf(table, &self.page_rw, serialized_row, &mut self.buf1, &mut self.buf2)?;
+        let payload_cell = PayloadCellView::new(table, self.buf1.as_ref(), 0);
+        let mut path = Vec::new_in(allocator.clone());
+        let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
+        btree::insert_payload_to_leaf(
+            &mut self.buf1, &mut self.buf2,
+            &mut self.buf3, &mut self.buf4,
+            leaf_page, table,
+            &self.page_rw, path,
+            allocator.clone()
+        )?;
+        self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
+        Ok(())
+    }
+
+    pub fn delete_from_table(&mut self, table_page: u32, key: Value<'_>, allocator: A) -> Result<(), Error<D::Error>> {
+        let _ = self.page_rw.read_page(table_page, self.table_buf.as_mut())?;
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+
+        if table.rows_btree_page == 0 {
+            return Err(Error::NotFound);
+        }
+
+        key.to_key(&mut self.buf1);
+        let key = unsafe { as_ref!(self.buf1, Key) };
+        let mut path: Vec<u32, A> = Vec::new_in(allocator.clone());
+        let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, key, &self.page_rw, &mut path)?;
+
+        btree::delete_payload_from_leaf(
+            &mut self.buf1, &mut self.buf2,
+            &mut self.buf3, &mut self.buf4,
+            leaf_page, table,
+            &self.page_rw, path,
+            allocator.clone()
+        )?;
+        self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
         Ok(())
     }
 
@@ -287,19 +311,37 @@ where
 
         {
             let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
-            let path = Column::new("cool_path".to_name(), ColumnType::Chars);
+            let path = Column::new("cool_path".to_name(), ColumnType::Chars).primary();
             self.new_table_begin("fav".to_name());
             self.add_column(path)?;
             let fav = self.create_table(allocator.clone())?;
         }
 
+        let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
+
         {
-            let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
-            let mut row = Row::new_in(allocator.clone());
-            row.push(Value::Chars(b"/some/file.txt"));
-            row.push(Value::Int(124));
-            row.push(Value::Chars(b"file.txt"));
-            self.insert_to_table(files, row, allocator.clone())?;
+            use rand::{SeedableRng, seq::SliceRandom};
+            use rand::rngs::StdRng;
+
+            let to = 1000;
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut ids: Vec<usize> = (0..to).collect();
+            ids.shuffle(&mut rng);
+
+            for i in ids.iter() {
+                let path = format!("/some/file_{}.txt", i);
+                println!("inserting = {}", path);
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(path.as_bytes()));
+                row.push(Value::Int(*i as i64));
+                row.push(Value::Chars(b"file.txt"));
+                self.insert_to_table(files, row, allocator.clone())?;
+            }
+
+            for i in 0..to {
+                let path = format!("/some/file_{}.txt", i);
+                self.delete_from_table(files, Value::Chars(path.as_bytes()), allocator.clone())?;
+            }
         }
 
         {
@@ -309,19 +351,31 @@ where
             self.insert_to_table(fav, row, allocator.clone())?;
         }
 
+        // {
+        //     let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
+        //     let query = Query::new(files, allocator.clone());
+        //     let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
+        //     let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
+        //     let mut row: Row<A> = Row::new_in(allocator.clone());
+        //     while let Ok(_) = exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
+        //         println!("row = {:?}", row);
+        //     }
+        // }
+
+        println!("after deleting all: ");
+
         {
             let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
-            let query = Query::new(files, allocator.clone()).key(Value::Chars(b"/some/file.txt"));
+            let query = Query::new(files, allocator.clone());
             let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
             let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
             let mut row: Row<A> = Row::new_in(allocator.clone());
-            match exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
-                Err(_) => return Err(Error::NotFound),
-                _ => ()
+            while let Ok(_) = exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
+                println!("row = {:?}", row);
             }
-
-            println!("row = {:?}", row);
         }
+
+        println!("deleted successfully");
 
         Ok(())
     }

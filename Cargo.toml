@@ -5,3 +5,6 @@ members = ["actual", "development", "db_engine"]
 [patch.crates-io]
 picoserve = { git = "https://github.com/sammhicks/picoserve.git", rev = "d68a535" }
 leasehund = { path = "patches/leasehund" }
+
+[profile.release]
+debug = true

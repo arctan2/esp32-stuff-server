@@ -242,6 +242,10 @@ pub fn serialize<'a, E: core::fmt::Debug, A: Allocator + Clone>(
         i += 1;
     }
 
+    if key.len() == 0 {
+        return Err(Error::MissingPrimaryKey);
+    }
+
     let num_cols = table.col_count;
     let num_bytes = ((num_cols + 7) / 8) as usize;
     let all_bytes = null_flags.to_le_bytes();

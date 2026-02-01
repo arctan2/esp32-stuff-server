@@ -185,7 +185,7 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
         cursor_buf: &'a mut PageBuffer<A>,
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
     ) -> Result<QueryExecutor<'a, A>, Error<D::Error>> {
-        let _ = page_rw.read_page(query.target_table, table_buf.as_mut());
+        let _ = page_rw.read_page(query.target_table, table_buf.as_mut())?;
         let table = unsafe { as_ref!(table_buf, Table) };
         let cursor = Cursor::new(table, cursor_buf, page_rw)?;
 

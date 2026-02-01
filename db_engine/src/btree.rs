@@ -5,7 +5,7 @@ use core::cmp::Ordering;
 use crate::types::{PageBuffer, PageBufferWriter, PageBufferReader};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
-use crate::{as_ref, as_ref_mut, PageRW, get_free_page, PageFreeList};
+use crate::{as_ref, as_ref_mut, PageRW, get_free_page, add_page_to_free_list, PageFreeList};
 use crate::table::{Table};
 use crate::serde_row::{Value, SerializedRow};
 use crate::overflow::OverflowPage;
@@ -281,6 +281,10 @@ impl <'a> InternalCellView<'a> {
         return s;
     }
 
+    pub fn print(&self) {
+        println!("InternalCellView {{ child: {}, key = {:?} }}", {self.header.child}, self.key());
+    }
+
     pub fn key(&self) -> &'a Key {
         let key_len = self.data[0] as usize;
         unsafe { &*(self.data[0..1 + key_len].as_ptr() as *const Key) as &Key }
@@ -339,13 +343,17 @@ impl <'a> BtreeCell<'a> {
             payload_cell: view.as_bytes()
         }
     }
+
+    pub fn as_internal_view(&self) -> InternalCellView<'a> {
+        InternalCellView::new(self.payload_cell, 0)
+    }
 }
 
 type BtreeCells<'a, A> = Vec<BtreeCell<'a>, A>;
 
 trait BtreeCellsOps {
     fn total_size(&self) -> usize;
-    fn sort_last_cell(&mut self);
+    fn sort_last_cell(&mut self) -> usize;
     fn binary_search_by_key(&self, key: &Key) -> Option<usize>;
 }
 
@@ -354,9 +362,9 @@ impl <'a, A: Allocator> BtreeCellsOps for BtreeCells<'a, A> {
         self.iter().map(|cell| cell.payload_cell.len()).sum()
     }
 
-    fn sort_last_cell(&mut self) {
+    fn sort_last_cell(&mut self) -> usize {
         if self.len() <= 1 {
-            return;
+            return 0;
         }
         let mut idx = self.len() - 1;
 
@@ -364,6 +372,8 @@ impl <'a, A: Allocator> BtreeCellsOps for BtreeCells<'a, A> {
             self.swap(idx, idx - 1);
             idx -= 1;
         }
+
+        return idx;
     }
 
     fn binary_search_by_key(&self, key: &Key) -> Option<usize>{
@@ -407,7 +417,7 @@ impl BtreeLeaf {
         };
     }
 
-    pub fn get_payload_cell(&self, table: &Table, idx: usize) -> Option<PayloadCellView<'_>> {
+    pub fn get_view(&self, table: &Table, idx: usize) -> Option<PayloadCellView<'_>> {
         let offsets = self.get_offsets();
         if idx < offsets.len() {
             Some(PayloadCellView::new(table, &self.data, offsets[idx] as usize))
@@ -448,8 +458,8 @@ impl BtreeLeaf {
             };
 
             for i in offsets.iter() {
-                let payload_cell = PayloadCellView::new(table, &self.data, *i as usize);
-                let cell = BtreeCell::from_leaf_view(payload_cell, table);
+                let view = PayloadCellView::new(table, &self.data, *i as usize);
+                let cell = BtreeCell::from_leaf_view(view, table);
                 cells.push(cell);
             }
 
@@ -464,15 +474,10 @@ impl BtreeLeaf {
 
         for i in start_idx..end_idx {
             let start = end - cells[i].payload_cell.len();
-            unsafe {
-                buffer::write_bytes(&mut self.data, start, &cells[i].payload_cell);
-            }
-            {
-                let mut offsets = self.get_offsets_mut();
-                offsets[offset_idx] = start as u16;
-                offset_idx += 1;
-            }
-
+            unsafe { buffer::write_bytes(&mut self.data, start, &cells[i].payload_cell) };
+            let mut offsets = self.get_offsets_mut();
+            offsets[offset_idx] = start as u16;
+            offset_idx += 1;
             end = start;
         }
     }
@@ -497,6 +502,48 @@ impl BtreeInternal {
         };
     }
 
+    pub fn get_view(&self, idx: usize) -> Option<InternalCellView<'_>> {
+        let offsets = self.get_offsets();
+        if idx < offsets.len() {
+            Some(InternalCellView::new(&self.data, offsets[idx] as usize))
+        } else {
+            None
+        }
+    }
+
+    pub fn find_view_idx_by_child(&self, child: u32) -> Option<usize> {
+        let offsets = self.get_offsets();
+        for i in 0..offsets.len() {
+            let view = InternalCellView::new(&self.data, offsets[i] as usize);
+            if view.header.child == child {
+                return Some(i);
+            }
+        }
+        return None;
+    }
+
+    pub fn get_left_sib_of_child(&self, child: u32) -> Option<u32> {
+        let ptr = self.data.as_ptr();
+        let offsets: &[u16] = unsafe {
+            core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
+        };
+
+        if self.left_child == child {
+            return None;
+        }
+
+        let mut prev = self.left_child;
+        for i in offsets.iter() {
+            let view = InternalCellView::new(&self.data, *i as usize);
+            if view.header.child == child {
+                return Some(prev);
+            }
+            prev = view.header.child;
+        }
+
+        return None
+    }
+
     pub fn next_child_by_key(&self, key: &Key) -> u32 {
         let offsets = self.get_offsets();
         let mut l = 0;
@@ -519,25 +566,38 @@ impl BtreeInternal {
             let cell = InternalCellView::new(&self.data, offsets[l - 1] as usize);
             return cell.header.child;
         }
+    }
 
+    pub fn print<'a>(&'a self) {
+        let ptr = self.data.as_ptr();
+        let offsets: &[u16] = unsafe {
+            core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
+        };
+
+        println!("BtreeInternal {{");
+        println!("\tleft_child = {}", {self.left_child});
+        for i in offsets.iter() {
+            let view = InternalCellView::new(&self.data, *i as usize);
+            print!("\t");
+            view.print();
+        }
+        println!("}}");
     }
 
     pub fn read_btree_cells<'a, A: Allocator>(&'a self, allocator: A) -> BtreeCells<'a, A> {
-        unsafe {
-            let mut cells: BtreeCells<A> = BtreeCells::new_in(allocator);
-            let ptr = self.data.as_ptr();
-            let offsets: &[u16] = unsafe {
-                core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
-            };
+        let mut cells: BtreeCells<A> = BtreeCells::new_in(allocator);
+        let ptr = self.data.as_ptr();
+        let offsets: &[u16] = unsafe {
+            core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
+        };
 
-            for i in offsets.iter() {
-                let payload_cell = InternalCellView::new(&self.data, *i as usize);
-                let cell = BtreeCell::from_internal_view(payload_cell);
-                cells.push(cell);
-            }
-
-            return cells;
+        for i in offsets.iter() {
+            let view = InternalCellView::new(&self.data, *i as usize);
+            let cell = BtreeCell::from_internal_view(view);
+            cells.push(cell);
         }
+
+        return cells;
     }
 
     pub fn write_btree_cells<A: Allocator>(&mut self, cells: &BtreeCells<A>, start_idx: usize, end_idx: usize) {
@@ -547,18 +607,31 @@ impl BtreeInternal {
 
         for i in start_idx..end_idx {
             let start = end - cells[i].payload_cell.len();
-            unsafe {
-                buffer::write_bytes(&mut self.data, start, &cells[i].payload_cell);
-            }
-            {
-                let mut offsets = self.get_offsets_mut();
-                offsets[offset_idx] = start as u16;
-                offset_idx += 1;
-            }
-
+            unsafe { buffer::write_bytes(&mut self.data, start, &cells[i].payload_cell); }
+            let mut offsets = self.get_offsets_mut();
+            offsets[offset_idx] = start as u16;
+            offset_idx += 1;
             end = start;
         }
     }
+}
+
+pub fn set_child_next_leaf<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    tmp_buf: &'a mut PageBuffer<A>,
+    child: u32,
+    next_leaf: u32,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+) -> Result<(), Error<D::Error>> {
+    let _ = page_rw.read_page(child, tmp_buf.as_mut())?;
+    let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
+    leaf.next_leaf = next_leaf;
+    page_rw.write_page(child, tmp_buf.as_ref())?;
+    Ok(())
 }
 
 pub fn promote_key_iter<
@@ -578,27 +651,62 @@ pub fn promote_key_iter<
     mut right: u32,
     allocator: A
 ) -> Result<(), Error<D::Error>> {
-    loop { unsafe {
-        let promoted_key = as_ref!(promoted_key_buf, Key);
+    let mut is_first_iter = true;
+    loop {
+        let promoted_key = unsafe { as_ref!(promoted_key_buf, Key) };
         
         if let Some(internal_page) = path.pop() {
             let _ = page_rw.read_page(internal_page, buf1.as_mut())?;
-            let internal = as_ref_mut!(buf1, BtreeInternal);
+            let internal = unsafe { as_ref_mut!(buf1, BtreeInternal) };
             let mut cells = internal.read_btree_cells(allocator.clone());
 
             InternalCellView::new_to_buf(page_rw, buf2, right, promoted_key)?;
             let internal_cell = InternalCellView::new(buf2.as_ref(), 0);
             cells.push(BtreeCell::from_internal_view(internal_cell));
-            cells.sort_last_cell();
+
+            // I can't reference the internal page directly. Because the new cell is in different
+            // buffer so I have to read from cells[i].payload_cell and cast it to InternalCellView
+
+            if is_first_iter {
+                is_first_iter = false;
+                let idx = cells.sort_last_cell();
+                if idx != cells.len() - 1 {
+                    let last_child = cells[cells.len() - 1].as_internal_view().header.child;
+                    set_child_next_leaf(buf3, last_child, 0, page_rw)?;
+                    if idx == 0 {
+                        let first_child = cells[0].as_internal_view().header.child;
+                        let first_child_next_child = if cells.len() > 1 {
+                            cells[1].as_internal_view().header.child
+                        } else {
+                            0
+                        };
+
+                        set_child_next_leaf(buf3, internal.left_child, first_child, page_rw)?;
+                        set_child_next_leaf(buf3, first_child, first_child_next_child, page_rw)?;
+                    } else {
+                        let prev_child = cells[idx - 1].as_internal_view().header.child;
+                        let cur_child = cells[idx].as_internal_view().header.child;
+                        let next_child = if cells.len() > idx {
+                            cells[idx + 1].as_internal_view().header.child
+                        } else {
+                            0
+                        };
+                        set_child_next_leaf(buf3, prev_child, cur_child, page_rw)?;
+                        set_child_next_leaf(buf3, cur_child, next_child, page_rw)?;
+                    }
+                }
+            } else {
+                let _ = cells.sort_last_cell();
+            }
 
             let total_size = cells.total_size() + (size_of::<u16>() * cells.len());
 
             if total_size >= internal.data.len() {
                 let mid = cells.len() / 2;
-                let new_page = get_free_page!(page_rw, buf3)?;
+                let new_page = unsafe { get_free_page!(page_rw, buf3)? };
 
                 {
-                    let right_child = as_ref_mut!(buf3, BtreeInternal);
+                    let right_child = unsafe { as_ref_mut!(buf3, BtreeInternal) };
                     right_child.init();
                     right_child.write_btree_cells(&cells, mid, cells.len());
                     page_rw.write_page(new_page, buf3.as_ref())?;
@@ -606,18 +714,18 @@ pub fn promote_key_iter<
 
                 {
                     buffer::copy_buf(buf3.as_mut(), buf1.as_ref());
-                    let tmp_internal = as_ref_mut!(buf3, BtreeInternal);
+                    let tmp_internal = unsafe { as_ref_mut!(buf3, BtreeInternal) };
                     tmp_internal.write_btree_cells(&cells, 0, mid);
                 }
 
                 let promoted_key = cells[mid].key;
-                buffer::write_bytes(promoted_key_buf.as_mut(), 0, promoted_key.as_bytes());
+                unsafe { buffer::write_bytes(promoted_key_buf.as_mut(), 0, promoted_key.as_bytes()) };
                 page_rw.write_page(internal_page, buf3.as_ref());
                 left = internal_page;
                 right = new_page;
             } else {
                 buffer::copy_buf(buf3.as_mut(), buf1.as_ref());
-                let tmp_internal = as_ref_mut!(buf3, BtreeInternal);
+                let tmp_internal = unsafe { as_ref_mut!(buf3, BtreeInternal) };
                 tmp_internal.write_btree_cells(&cells, 0, cells.len());
                 page_rw.write_page(internal_page, buf3.as_ref())?;
                 break;
@@ -629,8 +737,8 @@ pub fn promote_key_iter<
             cells.push(BtreeCell::from_internal_view(internal_cell));
 
             let new_internal_page_buf = buf2;
-            let new_internal_page = get_free_page!(page_rw, new_internal_page_buf)?;
-            let internal = as_ref_mut!(new_internal_page_buf, BtreeInternal);
+            let new_internal_page = unsafe { get_free_page!(page_rw, new_internal_page_buf)? };
+            let internal = unsafe { as_ref_mut!(new_internal_page_buf, BtreeInternal) };
             internal.init();
             internal.left_child = left;
             internal.write_btree_cells(&cells, 0, cells.len());
@@ -638,7 +746,7 @@ pub fn promote_key_iter<
             table.rows_btree_page = new_internal_page;
             break;
         }
-    }}
+    }
 
     return Ok(());
 }
@@ -669,36 +777,35 @@ pub fn split_leaf_iter<
     // * now I write the tmp_buf1 to storage
     // * current state: tmp_buf1 has the promoted_key and [payload_cell_buf, leaf_buf, tmp_buf1] are free
 
-    unsafe {
-        let mid = cells.len() / 2;
-        let new_leaf_page = get_free_page!(page_rw, tmp_buf1)?;
+    let mid = cells.len() / 2;
+    let new_leaf_page = unsafe { get_free_page!(page_rw, tmp_buf1)? };
 
-        {
-            let new_leaf = as_ref_mut!(tmp_buf1, BtreeLeaf);
-            new_leaf.init();
-            new_leaf.write_btree_cells(&cells, mid, cells.len());
-            page_rw.write_page(new_leaf_page, tmp_buf1.as_ref())?;
-        }
-
-        {
-            buffer::copy_buf(tmp_buf1.as_mut(), leaf_buf.as_ref());
-            let tmp_leaf = as_ref_mut!(tmp_buf1, BtreeLeaf);
-            tmp_leaf.next_leaf = new_leaf_page;
-            tmp_leaf.write_btree_cells(&cells, 0, mid);
-        }
-
-        let promoted_key_buf = tmp_buf2;
-        let promoted_key = cells[mid].key;
-        buffer::write_bytes(promoted_key_buf.as_mut(), 0, promoted_key.as_bytes());
-        page_rw.write_page(leaf_page, tmp_buf1.as_ref());
-        return promote_key_iter(
-            promoted_key_buf, leaf_buf,
-            payload_cell_buf, tmp_buf1,
-            table, path, page_rw,
-            leaf_page, new_leaf_page,
-            allocator
-        );
+    {
+        let new_leaf = unsafe { as_ref_mut!(tmp_buf1, BtreeLeaf) };
+        new_leaf.init();
+        new_leaf.write_btree_cells(&cells, mid, cells.len());
+        page_rw.write_page(new_leaf_page, tmp_buf1.as_ref())?;
     }
+
+    {
+        buffer::copy_buf(tmp_buf1.as_mut(), leaf_buf.as_ref());
+        let tmp_leaf = unsafe { as_ref_mut!(tmp_buf1, BtreeLeaf) };
+        tmp_leaf.next_leaf = new_leaf_page;
+        tmp_leaf.write_btree_cells(&cells, 0, mid);
+    }
+
+    let promoted_key_buf = tmp_buf2;
+    let promoted_key = cells[mid - 1].key;
+    unsafe { buffer::write_bytes(promoted_key_buf.as_mut(), 0, promoted_key.as_bytes()) };
+    page_rw.write_page(leaf_page, tmp_buf1.as_ref());
+
+    return promote_key_iter(
+        promoted_key_buf, leaf_buf,
+        payload_cell_buf, tmp_buf1,
+        table, path, page_rw,
+        leaf_page, new_leaf_page,
+        allocator
+    );
 }
 
 pub fn insert_payload_to_leaf<
@@ -717,37 +824,144 @@ pub fn insert_payload_to_leaf<
     mut path: Vec<u32, A>,
     allocator: A
 ) -> Result<(), Error<D::Error>> {
-    unsafe {
-        let payload_cell = PayloadCellView::new_unsafe(table, unsafe { payload_cell_buf.as_ptr(0) }, PAGE_SIZE, 0);
-        let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
-        let leaf = as_ref!(leaf_buf, BtreeLeaf);
-        let mut cells = leaf.read_btree_cells(table, allocator.clone());
+    let view = PayloadCellView::new_unsafe(table, unsafe { payload_cell_buf.as_ptr(0) }, PAGE_SIZE, 0);
+    let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
+    let leaf = unsafe { as_ref!(leaf_buf, BtreeLeaf) };
+    let mut cells = leaf.read_btree_cells(table, allocator.clone());
 
-        if let Some(_) = cells.binary_search_by_key(payload_cell.key()) {
-            return Err(Error::DuplicateKey);
-        }
-
-        cells.push(BtreeCell::from_leaf_view(payload_cell, table));
-        cells.sort_last_cell();
-
-        let total_size = cells.total_size() + (size_of::<u16>() * cells.len());
-
-        if total_size >= leaf.data.len() {
-            split_leaf_iter(
-                payload_cell_buf, leaf_buf,
-                tmp_buf1, tmp_buf2,
-                leaf_page, table, page_rw,
-                path, cells, allocator
-            )?;
-        } else {
-            buffer::copy_buf(tmp_buf1.as_mut(), leaf_buf.as_ref());
-            let tmp_leaf = as_ref_mut!(tmp_buf1, BtreeLeaf);
-            tmp_leaf.write_btree_cells(&cells, 0, cells.len());
-            page_rw.write_page(leaf_page, tmp_buf1.as_ref())?;
-        }
-
-        Ok(())
+    if let Some(_) = cells.binary_search_by_key(view.key()) {
+        return Err(Error::DuplicateKey);
     }
+
+    cells.push(BtreeCell::from_leaf_view(view, table));
+    let _ = cells.sort_last_cell();
+
+    let total_size = cells.total_size() + (size_of::<u16>() * cells.len());
+
+    if total_size >= leaf.data.len() {
+        return split_leaf_iter(
+            payload_cell_buf, leaf_buf,
+            tmp_buf1, tmp_buf2,
+            leaf_page, table, page_rw,
+            path, cells, allocator
+        );
+    }
+
+    buffer::copy_buf(tmp_buf1.as_mut(), leaf_buf.as_ref());
+    let tmp_leaf = unsafe { as_ref_mut!(tmp_buf1, BtreeLeaf) };
+    tmp_leaf.write_btree_cells(&cells, 0, cells.len());
+    page_rw.write_page(leaf_page, tmp_buf1.as_ref())?;
+
+    Ok(())
+}
+
+pub fn delete_shift_iter<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    tmp_buf1: &mut PageBuffer<A>,
+    tmp_buf2: &mut PageBuffer<A>,
+    leaf_page: u32,
+    table: &mut Table,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    mut path: Vec<u32, A>,
+    allocator: A
+) -> Result<(), Error<D::Error>> {
+    let mut removed_page = leaf_page;
+
+    while path.len() > 0 {
+        let internal_page = path.pop().unwrap();
+        let _ = page_rw.read_page(internal_page, tmp_buf1.as_mut());
+        let internal = unsafe { as_ref_mut!(tmp_buf1, BtreeInternal) };
+        let mut cells = internal.read_btree_cells(allocator.clone());
+        
+        if internal.left_child == removed_page {
+            let internal = unsafe { as_ref_mut!(tmp_buf1, BtreeInternal) };
+            internal.left_child = match internal.get_view(0) {
+                Some(view) => {
+                    cells.remove(0);
+                    view.header.child
+                },
+                None => 0
+            };
+        } else {
+            if let Some(idx) = internal.find_view_idx_by_child(removed_page) {
+                cells.remove(idx);
+            }
+        }
+
+        if cells.len() > 0 || internal.left_child > 0 {
+            buffer::copy_buf(tmp_buf2.as_mut(), tmp_buf1.as_ref());
+            let tmp_internal = unsafe { as_ref_mut!(tmp_buf2, BtreeInternal) };
+            tmp_internal.write_btree_cells(&cells, 0, cells.len());
+            page_rw.write_page(internal_page, tmp_buf2.as_ref())?;
+            return Ok(())
+        }
+
+        removed_page = internal_page;
+        unsafe { add_page_to_free_list!(page_rw, removed_page, tmp_buf1) };
+    }
+    table.rows_btree_page = 0;
+    Ok(())
+}
+
+pub fn delete_payload_from_leaf<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+>(
+    key_buf: &mut PageBuffer<A>,
+    leaf_buf: &mut PageBuffer<A>,
+    tmp_buf1: &mut PageBuffer<A>,
+    tmp_buf2: &mut PageBuffer<A>,
+    leaf_page: u32,
+    table: &mut Table,
+    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    mut path: Vec<u32, A>,
+    allocator: A
+) -> Result<(), Error<D::Error>> {
+    let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
+    let leaf = unsafe { as_ref!(leaf_buf, BtreeLeaf) };
+    let key = unsafe { as_ref!(key_buf, Key) };
+    let mut cells = leaf.read_btree_cells(table, allocator.clone());
+    let cell_idx = cells.binary_search_by_key(key).ok_or(Error::NotFound)?;
+
+    cells.remove(cell_idx);
+
+    if cells.len() == 0 {
+        let next_leaf = leaf.next_leaf;
+        unsafe { add_page_to_free_list!(page_rw, leaf_page, leaf_buf) };
+        if path.len() == 0 {
+            table.rows_btree_page = 0;
+            return Ok(());
+        }
+
+        let internal_buf = leaf_buf;
+        let _ = page_rw.read_page(path[path.len() - 1], internal_buf.as_mut());
+        let internal = unsafe { as_ref!(internal_buf, BtreeInternal) };
+        if let Some(sib) = internal.get_left_sib_of_child(leaf_page) {
+            let _ = page_rw.read_page(sib, tmp_buf1.as_mut())?;
+            let sib_leaf = unsafe { as_ref_mut!(tmp_buf1, BtreeLeaf) };
+            sib_leaf.next_leaf = next_leaf;
+            page_rw.write_page(sib, tmp_buf1.as_ref())?;
+        }
+
+        return delete_shift_iter(
+            key_buf, internal_buf,
+            leaf_page, table, page_rw,
+            path, allocator
+        );
+    }
+
+    buffer::copy_buf(tmp_buf1.as_mut(), leaf_buf.as_ref());
+    let tmp_leaf = unsafe { as_ref_mut!(tmp_buf1, BtreeLeaf) };
+    tmp_leaf.write_btree_cells(&cells, 0, cells.len());
+    page_rw.write_page(leaf_page, tmp_buf1.as_ref())?;
+
+    Ok(())
 }
 
 pub fn traverse_to_leaf_with_path<
@@ -762,22 +976,23 @@ pub fn traverse_to_leaf_with_path<
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
     path: &mut Vec<u32, A>
 ) -> Result<u32, Error<D::Error>> {
-    unsafe {
-        let mut cur_page = table.rows_btree_page;
-        loop {
-            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
-            let btree_page = as_ref!(tmp_buf, BtreePage);
-            if btree_page.node_type == NodeType::Leaf {
-                break;
-            }
-            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
-            let next_child = btree_internal.next_child_by_key(key);
-            path.push(cur_page);
-            cur_page = next_child;
-        }
-
-        return Ok(cur_page);
+    let mut cur_page = table.rows_btree_page;
+    if cur_page == 0 {
+        return Err(Error::TableEmpty);
     }
+    loop {
+        let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
+        let btree_page = unsafe { as_ref!(tmp_buf, BtreePage) };
+        if btree_page.node_type == NodeType::Leaf {
+            break;
+        }
+        let btree_internal = unsafe { as_ref!(tmp_buf, BtreeInternal) };
+        let next_child = btree_internal.next_child_by_key(key);
+        path.push(cur_page);
+        cur_page = next_child;
+    }
+
+    return Ok(cur_page);
 }
 
 pub fn traverse_to_leaf<
@@ -791,20 +1006,22 @@ pub fn traverse_to_leaf<
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
 ) -> Result<u32, Error<D::Error>> {
-    unsafe {
-        let mut cur_page = table.rows_btree_page;
-        loop {
-            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
-            let btree_page = as_ref!(tmp_buf, BtreePage);
-            if btree_page.node_type == NodeType::Leaf {
-                break;
-            }
-            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
-            cur_page = btree_internal.next_child_by_key(key);
-        }
-
-        return Ok(cur_page);
+    let mut cur_page = table.rows_btree_page;
+    if cur_page == 0 {
+        return Err(Error::TableEmpty);
     }
+
+    loop {
+        let _ = page_rw.read_page(cur_page, tmp_buf.as_mut())?;
+        let btree_page = unsafe { as_ref!(tmp_buf, BtreePage) };
+        if btree_page.node_type == NodeType::Leaf {
+            break;
+        }
+        let btree_internal = unsafe { as_ref!(tmp_buf, BtreeInternal) };
+        cur_page = btree_internal.next_child_by_key(key);
+    }
+
+    return Ok(cur_page);
 }
 
 pub fn find_by_key<
@@ -818,7 +1035,7 @@ pub fn find_by_key<
     key: &Key,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
 ) -> Result<PayloadCellView<'a>, Error<D::Error>> {
-    let _ = traverse_to_leaf(table, tmp_buf, key, page_rw);
+    let _ = traverse_to_leaf(table, tmp_buf, key, page_rw)?;
     let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
 
     return match leaf.find_payload_by_key(table, key) {
@@ -837,20 +1054,21 @@ pub fn traverse_to_left_most<
     tmp_buf: &mut PageBuffer<A>,
     page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
 ) -> Result<u32, Error<D::Error>> {
-    unsafe {
-        let mut cur_page = table.rows_btree_page;
-        loop {
-            let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
-            let btree_page = as_ref!(tmp_buf, BtreePage);
-            if btree_page.node_type == NodeType::Leaf {
-                break;
-            }
-            let btree_internal = as_ref!(tmp_buf, BtreeInternal);
-            cur_page = btree_internal.left_child;
-        }
-
-        return Ok(cur_page);
+    let mut cur_page = table.rows_btree_page;
+    if cur_page == 0 {
+        return Err(Error::TableEmpty);
     }
+    loop {
+        let _ = page_rw.read_page(cur_page, tmp_buf.as_mut())?;
+        let btree_page = unsafe { as_ref!(tmp_buf, BtreePage) };
+        if btree_page.node_type == NodeType::Leaf {
+            break;
+        }
+        let btree_internal = unsafe { as_ref!(tmp_buf, BtreeInternal) };
+        cur_page = btree_internal.left_child;
+    }
+
+    return Ok(cur_page);
 }
 
 pub struct Cursor<'a, A: Allocator + Clone> {
@@ -900,7 +1118,7 @@ impl <'a, A: Allocator + Clone> Cursor<'a, A> {
         }
         let cur_idx = self.cur_idx;
         self.cur_idx += 1;
-        if let Some(view) = leaf.get_payload_cell(table, cur_idx) {
+        if let Some(view) = leaf.get_view(table, cur_idx) {
             Ok(view)
         } else {
             Err(Error::EndOfRecords)
