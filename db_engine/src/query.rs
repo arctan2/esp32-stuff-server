@@ -167,32 +167,48 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
     // }
 }
 
-pub struct QueryExecutor<'a, A: Allocator + Clone> {
+pub struct QueryExecutor<
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+> {
     table_buf: &'a mut PageBuffer<A>,
+    tmp_buf: &'a mut PageBuffer<A>,
     cursor: Cursor<'a, A>,
     query: Query<'a, A>,
+    is_ran: bool,
+    payload: Vec<u8, A>,
+    row: Row<'a, A>,
+    page_rw: &'a PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
 }
 
-impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
-    pub fn new<
-        D: BlockDevice, T: TimeSource,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+impl <
+    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
+    const MAX_DIRS: usize,
+    const MAX_FILES: usize,
+    const MAX_VOLUMES: usize
+> QueryExecutor<'a, D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES> {
+    pub fn new(
         query: Query<'a, A>,
         table_buf: &'a mut PageBuffer<A>,
+        tmp_buf: &'a mut PageBuffer<A>,
         cursor_buf: &'a mut PageBuffer<A>,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<QueryExecutor<'a, A>, Error<D::Error>> {
+        page_rw: &'a PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    ) -> Result<QueryExecutor<'a, D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, Error<D::Error>> {
         let _ = page_rw.read_page(query.target_table, table_buf.as_mut())?;
         let table = unsafe { as_ref!(table_buf, Table) };
         let cursor = Cursor::new(table, cursor_buf, page_rw)?;
 
         Ok(Self {
             table_buf: table_buf,
+            tmp_buf: tmp_buf,
             cursor: cursor,
+            payload: Vec::new_in(query.allocator.clone()),
+            row: Row::new_in(query.allocator.clone()),
             query: query,
+            is_ran: false,
+            page_rw: page_rw,
         })
     }
 
@@ -226,20 +242,31 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
         }
     }
 
-    pub fn next<
-        D: BlockDevice, T: TimeSource,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub fn count(
         &mut self,
         tmp_buf: &mut PageBuffer<A>,
         payload: &mut Vec<u8, A>,
         row: &mut Row<'a, A>,
         page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    ) -> Result<(), Error<D::Error>> {
-        let _ = page_rw.read_page(self.query.target_table, self.table_buf.as_mut())?;
+    ) -> Result<usize, Error<D::Error>> {
+        let mut count = 0;
+
+        loop {
+            match self.next() {
+                Ok(_) => count += 1,
+                Err(e) => match e {
+                    Error::EndOfRecords => return Ok(count),
+                    _ => return Err(e)
+                }
+            }
+        }
+    }
+
+    pub fn next(&mut self) -> Result<&mut Row<'a, A>, Error<D::Error>> {
+        let _ = self.page_rw.read_page(self.query.target_table, self.table_buf.as_mut())?;
         let target_table = unsafe { as_ref!(self.table_buf, Table) };
+        let payload = &mut self.payload;
+        let row = &mut self.row;
 
         'outter: loop {
             row.clear();
@@ -247,14 +274,18 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
             payload.clear();
 
             let cell = if let Some(key) = &self.query.key {
-                btree::find_by_key(target_table, tmp_buf, unsafe { &*((&key.as_slice()).as_ptr() as *const Key) }, page_rw)?
+                if self.is_ran {
+                    return Err(Error::EndOfRecords);
+                }
+                self.is_ran = true;
+                btree::find_by_key(target_table, self.tmp_buf, unsafe { &*((&key.as_slice()).as_ptr() as *const Key) }, self.page_rw)?
             } else {
-                self.cursor.next(target_table, page_rw)?
+                self.cursor.next(target_table, self.page_rw)?
             };
 
             payload.extend_from_slice(cell.payload(target_table.get_null_flags_width_bytes()));
             if cell.header.payload_overflow > 0 {
-                 OverflowPage::read_all(page_rw, cell.header.payload_overflow, payload, tmp_buf)?;
+                 OverflowPage::read_all(self.page_rw, cell.header.payload_overflow, payload, self.tmp_buf)?;
             }
 
             serde_row::deserialize(target_table, row, &payload.as_slice()[0..]);
@@ -278,7 +309,7 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
                         }
                     }
 
-                    return Ok(());
+                    return Ok(row);
                 },
                 TopLevelOperator::Or(conditions) => {
                     for condition in conditions.iter() {
@@ -294,7 +325,7 @@ impl <'a, A: Allocator + Clone> QueryExecutor<'a, A> {
                         }
 
                         if result {
-                            return Ok(());
+                            return Ok(row);
                         }
                     }
                 },

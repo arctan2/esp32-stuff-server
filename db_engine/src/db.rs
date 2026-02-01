@@ -5,7 +5,7 @@ use crate::btree::{BtreeLeaf, PayloadCellView, Key};
 use crate::table::{Table, Column, ColumnType, ToName, Name};
 use crate::PageRW;
 use crate::types::PageBuffer;
-use crate::{PageFreeList, as_ref_mut, as_ref, get_free_page, add_page_to_free_list};
+use crate::{PageFreeList, as_ref_mut, as_ref, get_free_page};
 use allocator_api2::vec::Vec;
 use crate::serde_row;
 use crate::serde_row::{Value, Row};
@@ -34,15 +34,6 @@ pub struct DBHeader {
     page_count: u32,
 }
 
-impl Default for DBHeader {
-    fn default() -> Self {
-        Self {
-            magic: MAGIC,
-            page_count: 0,
-        }
-    }
-}
-
 impl DBHeader {
     pub fn inc_page_count<
         'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
@@ -60,6 +51,13 @@ impl DBHeader {
         }
         let _ = page_rw.write_page(0, buf)?;
         Ok(())
+    }
+
+    pub fn default() -> Self {
+        Self {
+            magic: MAGIC,
+            page_count: 0,
+        }
     }
 }
 
@@ -124,7 +122,7 @@ where
             buf1: PageBuffer::new(allocator.clone()),
             buf2: PageBuffer::new(allocator.clone()),
             buf3: PageBuffer::new(allocator.clone()),
-            buf4: PageBuffer::new(allocator),
+            buf4: PageBuffer::new(allocator.clone()),
         };
     }
 
@@ -234,15 +232,9 @@ where
         let db_cat_page = FixedPages::DbCat.into();
         let query = Query::new(db_cat_page, allocator.clone()).key(Value::Chars(&name));
 
-        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
+        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &mut self.buf2, &self.page_rw)?;
 
-        let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
-        let mut row: Row<A> = Row::new_in(allocator.clone());
-
-        match exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
-            Err(_) => return Err(Error::NotFound),
-            _ => ()
-        }
+        let row = exec.next()?;
 
         return match row[1] {
             Value::Int(page) => Ok(page as u32),
@@ -254,12 +246,8 @@ where
         let db_cat_page = FixedPages::DbCat.into();
         let query = Query::new(db_cat_page, allocator.clone());
 
-        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw).unwrap();
-
-        let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
-        let mut row: Row<A> = Row::new_in(allocator.clone());
-
-        while let Ok(_) = exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
+        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf2, &mut self.buf1, &self.page_rw).unwrap();
+        while let Ok(row) = exec.next() {
             println!("table = {:?}", row);
         }
     }
@@ -306,15 +294,17 @@ where
             self.add_column(path)?;
             self.add_column(size)?;
             self.add_column(name)?;
-            let files = self.create_table(allocator.clone())?;
+            let _ = self.create_table(allocator.clone())?;
         }
 
         {
-            let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
             let path = Column::new("cool_path".to_name(), ColumnType::Chars).primary();
             self.new_table_begin("fav".to_name());
             self.add_column(path)?;
             let fav = self.create_table(allocator.clone())?;
+            let mut row = Row::new_in(allocator.clone());
+            row.push(Value::Chars(b"/some/file.txt"));
+            self.insert_to_table(fav, row, allocator.clone())?;
         }
 
         let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
@@ -330,7 +320,6 @@ where
 
             for i in ids.iter() {
                 let path = format!("/some/file_{}.txt", i);
-                println!("inserting = {}", path);
                 let mut row = Row::new_in(allocator.clone());
                 row.push(Value::Chars(path.as_bytes()));
                 row.push(Value::Int(*i as i64));
@@ -338,17 +327,10 @@ where
                 self.insert_to_table(files, row, allocator.clone())?;
             }
 
-            for i in 0..to {
+            for i in 0..900 {
                 let path = format!("/some/file_{}.txt", i);
                 self.delete_from_table(files, Value::Chars(path.as_bytes()), allocator.clone())?;
             }
-        }
-
-        {
-            let fav = self.get_table("fav".to_name(), allocator.clone()).unwrap();
-            let mut row = Row::new_in(allocator.clone());
-            row.push(Value::Chars(b"/some/file.txt"));
-            self.insert_to_table(fav, row, allocator.clone())?;
         }
 
         // {
@@ -367,15 +349,12 @@ where
         {
             let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
             let query = Query::new(files, allocator.clone());
-            let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &self.page_rw)?;
-            let mut payload: Vec<u8, A> = Vec::new_in(allocator.clone());
-            let mut row: Row<A> = Row::new_in(allocator.clone());
-            while let Ok(_) = exec.next(&mut self.buf2, &mut payload, &mut row, &self.page_rw) {
+            let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &mut self.buf2, &self.page_rw)?;
+
+            while let Ok(row) = exec.next() {
                 println!("row = {:?}", row);
             }
         }
-
-        println!("deleted successfully");
 
         Ok(())
     }
