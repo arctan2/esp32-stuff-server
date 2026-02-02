@@ -194,9 +194,11 @@ where
         let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), &self.page_rw, &mut path)?;
 
         let mut wal_handler = WalHandler::new(self.dir, &self.page_rw);
-        wal_handler.begin(&mut self.buf2)?;
-        wal_handler.append_pages_vec(&path, &mut self.buf2)?;
-        wal_handler.append_page(leaf_page, &mut self.buf2)?;
+        wal_handler.begin_write(&mut self.buf2)?; {
+            wal_handler.append_pages_vec(&path, &mut self.buf2)?;
+            wal_handler.append_page(leaf_page, &mut self.buf2)?;
+        }
+        wal_handler.end_write()?;
 
         btree::insert_payload_to_leaf(
             &mut self.buf1, &mut self.buf2,
@@ -207,7 +209,7 @@ where
         )?;
         self.page_rw.write_page(table_page, self.table_buf.as_ref())?;
 
-        wal_handler.end()?;
+        wal_handler.delete_wal()?;
 
         Ok(())
     }
@@ -298,12 +300,14 @@ where
     }
 
     pub fn init(&mut self, allocator: A) -> Result<(), Error<D::Error>> {
-        let mut wal_handler = WalHandler::new(self.dir, &self.page_rw);
-        wal_handler.check_restore_wal(&mut self.buf1);
-
         let header = self.get_or_create_header()?;
         if header.page_count == 0 {
             self.create_new_db(header)?;
+        }
+
+        {
+            let mut wal_handler = WalHandler::new(self.dir, &self.page_rw);
+            wal_handler.check_restore_wal(&mut self.buf1)?;
         }
 
         {
@@ -364,18 +368,29 @@ where
         //     }
         // }
 
-        println!("after deleting all: ");
+        // println!("after deleting all: ");
 
-        {
-            let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
-            let query = Query::new(files, allocator.clone());
-            let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &mut self.buf2, &self.page_rw)?;
+        // {
+        //     let files = self.get_table("files".to_name(), allocator.clone()).unwrap();
+        //     let query = Query::new(files, allocator.clone());
+        //     let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &mut self.buf2, &self.page_rw)?;
 
-            while let Ok(row) = exec.next() {
-                println!("row = {:?}", row);
-            }
-        }
+        //     while let Ok(row) = exec.next() {
+        //         println!("row = {:?}", row);
+        //     }
+        // }
+
+        println!("done");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_single_row() {
     }
 }
