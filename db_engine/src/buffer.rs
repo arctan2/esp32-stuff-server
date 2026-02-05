@@ -17,11 +17,11 @@ pub unsafe fn as_mut<T>(buf: &mut [u8], offset: usize) -> &mut T {
     }
 }
 
-pub unsafe fn as_ref<T>(buf: &[u8], offset: usize) -> &T {
+pub unsafe fn as_ref<T>(buf: &[u8], offset: usize) -> T {
     unsafe {
         let size = core::mem::size_of::<T>();
-        let ptr = &*(buf[offset..offset + size].as_ptr() as *const T) as &T;
-        ptr
+        let ptr = buf[offset..offset + size].as_ptr() as *const T;
+        core::ptr::read_unaligned(ptr)
     }
 }
 

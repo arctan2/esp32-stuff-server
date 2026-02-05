@@ -1,6 +1,7 @@
 use crate::fs::{Mode, DbDir, PageFile};
 use embedded_sdmmc::{BlockDevice, TimeSource, File, Directory, Mode as SdMode};
 
+#[derive(Debug)]
 pub struct DbDirSdmmc<
     'a, D, T,
     const MAX_DIRS: usize,
@@ -14,6 +15,7 @@ where
     pub dir: Directory<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
 }
 
+#[derive(Debug)]
 pub struct FileSdmmc<
     'a, D, T,
     const MAX_DIRS: usize,

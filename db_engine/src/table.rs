@@ -10,12 +10,21 @@ pub trait ToName {
     fn to_name(&self) -> Name;
 }
 
-impl ToName for str {
+impl ToName for &str {
     fn to_name(&self) -> Name {
         let mut buffer = [0u8; NAME_MAX_LEN];
         let src = self.as_bytes();
         let len = core::cmp::min(src.len(), NAME_MAX_LEN);
         buffer[..len].copy_from_slice(&src[..len]);
+        buffer
+    }
+}
+
+impl ToName for &[u8] {
+    fn to_name(&self) -> Name {
+        let mut buffer = [0u8; NAME_MAX_LEN];
+        let len = core::cmp::min(self.len(), NAME_MAX_LEN);
+        buffer[..len].copy_from_slice(&self[..len]);
         buffer
     }
 }
@@ -90,22 +99,22 @@ impl Table {
         &self.columns[0..self.col_count as usize]
     }
 
-    pub fn get_col_idx_by_name(&self, name: Name) -> Option<usize> {
+    pub fn get_col_idx_by_name(&self, name: impl ToName) -> Option<usize> {
         let columns = self.get_columns();
 
         for (idx, col) in columns.iter().enumerate() {
-            if col.name == name {
+            if col.name == name.to_name() {
                 return Some(idx);
             }
         }
         None
     }
 
-    pub fn get_col_idx_by_name_ref(&self, name: &Name) -> Option<usize> {
+    pub fn get_col_idx_by_name_ref(&self, name: &impl ToName) -> Option<usize> {
         let columns = self.get_columns();
 
         for (idx, col) in columns.iter().enumerate() {
-            if col.name == *name {
+            if col.name == name.to_name() {
                 return Some(idx);
             }
         }
@@ -114,9 +123,9 @@ impl Table {
 }
 
 impl Column {
-    pub fn new(name: Name, col_type: ColumnType) -> Self {
+    pub fn new(name: impl ToName, col_type: ColumnType) -> Self {
         Self {
-            name: name,
+            name: name.to_name(),
             flags: Flags::None as u8,
             col_type: col_type,
             ref_table: 0,

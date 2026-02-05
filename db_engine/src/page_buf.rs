@@ -44,18 +44,6 @@ impl <A> PageBuffer<A> where A: Allocator + Clone {
         let ptr = self.0[offset..offset + size].as_ptr() as *const T;
         ptr
     }
-
-    pub unsafe fn as_type_mut<T>(&mut self, offset: usize) -> &mut T {
-        unsafe {
-            buffer::as_mut::<T>(&mut *self.0, offset)
-        }
-    }
-
-    pub unsafe fn as_type_ref<T>(&self, offset: usize) -> &T {
-        unsafe {
-            buffer::as_ref::<T>(&*self.0, offset)
-        }
-    }
 }
 
 impl<A: Allocator + Clone> AsRef<[u8; PAGE_SIZE]> for PageBuffer<A> {
@@ -113,7 +101,7 @@ impl<'a> PageBufferReader<'a> {
         unsafe {
             let off = self.cur_offset;
             self.cur_offset += size_of::<T>();
-            return *(buffer::as_ref::<T>(self.buf, off));
+            return buffer::as_ref::<T>(self.buf, off);
         }
     }
 

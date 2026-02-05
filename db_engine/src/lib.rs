@@ -20,4 +20,4 @@ mod file_handler;
 
 pub use table::{Column, ColumnType, Name, ToName};
 pub use query::{Query, QueryExecutor};
-pub use serde_row::{Row, Value};
+pub use serde_row::{Row, Value, Operations};

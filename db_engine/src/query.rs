@@ -3,7 +3,7 @@
 use allocator_api2::alloc::Allocator;
 use crate::btree;
 use crate::btree::{Cursor, Key};
-use crate::table::{Table, Name};
+use crate::table::{Table, ToName};
 use crate::page_rw::{PageRW};
 use crate::fs::{PageFile};
 use crate::page_buf::PageBuffer;
@@ -40,79 +40,79 @@ impl Operator {
 }
 
 #[derive(Debug)]
-pub enum Expr<'a> {
+pub enum Expr<'a, N: ToName> {
     Val(Value<'a>),
     // Col(ColumnName) // later (hopefully) when I decide to do joins this will be used
-    Col(Name)
+    Col(N)
 }
 
 #[derive(Debug)]
-pub struct ColumnName {
+pub struct ColumnName<N: ToName> {
     table: u32,
-    name: Name
+    name: N
 }
 
 #[derive(Debug)]
-pub struct Op<'a> {
-    lhs: Expr<'a>,
+pub struct Op<'a, N: ToName> {
+    lhs: Expr<'a, N>,
     op: Operator,
-    rhs: Option<Expr<'a>>,
+    rhs: Option<Expr<'a, N>>,
 }
 
-impl <'a> Op<'a> {
-    pub fn eq(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+impl <'a, N> Op<'a, N> where N: ToName {
+    pub fn eq(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::Eq, rhs: Some(rhs) }
     }
 
-    pub fn gt(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+    pub fn gt(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::Gt, rhs: Some(rhs) }
     }
 
-    pub fn lt(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+    pub fn lt(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::Lt, rhs: Some(rhs) }
     }
 
-    pub fn starts_with(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+    pub fn starts_with(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::StartsWith, rhs: Some(rhs) }
     }
 
-    pub fn ends_with(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+    pub fn ends_with(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::EndsWith, rhs: Some(rhs) }
     }
 
-    pub fn contains(lhs: Expr<'a>, rhs: Expr<'a>) -> Self {
+    pub fn contains(lhs: Expr<'a, N>, rhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::Contains, rhs: Some(rhs) }
     }
 
-    pub fn is_null(lhs: Expr<'a>) -> Self {
+    pub fn is_null(lhs: Expr<'a, N>) -> Self {
         Self { lhs, op: Operator::IsNull, rhs: None }
     }
 }
 
 #[derive(Debug)]
-pub enum Condition<'a> {
-    Is(Op<'a>),
-    Not(Op<'a>),
+pub enum Condition<'a, N: ToName> {
+    Is(Op<'a, N>),
+    Not(Op<'a, N>),
 }
 
-pub enum TopLevelOperator<'a, A: Allocator + Clone> {
-    And(Vec<Condition<'a>, A>),
-    Or(Vec<Condition<'a>, A>)
+pub enum TopLevelOperator<'a, A: Allocator + Clone, N: ToName = &'a str> {
+    And(Vec<Condition<'a, N>, A>),
+    Or(Vec<Condition<'a, N>, A>)
 }
 
 pub struct Limit(usize, usize);
 
-pub struct Query<'a, A: Allocator + Clone> {
+pub struct Query<'a, A: Allocator + Clone, N: ToName = &'a str> {
     allocator: A,
     target_table: u32,
     // tables: Vec<u32, A>,
-    filters: TopLevelOperator<'a, A>,
+    filters: TopLevelOperator<'a, A, N>,
     key: Option<Vec<u8, A>>,
     // project: Vec<ColumnName, A>,
     limit: Option<Limit>,
 }
 
-impl <'a, A> Query<'a, A> where A: Allocator + Clone {
+impl <'a, A, N> Query<'a, A, N> where A: Allocator + Clone, N: ToName {
     pub fn new(target_table: u32, allocator: A) -> Self {
         Self {
             allocator: allocator.clone(),
@@ -133,7 +133,7 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
         self
     }
 
-    pub fn not(mut self, op: Op<'a>) -> Self {
+    pub fn not(mut self, op: Op<'a, N>) -> Self {
         match self.filters {
             TopLevelOperator::And(ref mut v) => v.push(Condition::Not(op)),
             TopLevelOperator::Or(ref mut v) => v.push(Condition::Not(op))
@@ -141,7 +141,7 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
         self
     }
 
-    pub fn is(mut self, op: Op<'a>) -> Self {
+    pub fn is(mut self, op: Op<'a, N>) -> Self {
         match self.filters {
             TopLevelOperator::And(ref mut v) => v.push(Condition::Is(op)),
             TopLevelOperator::Or(ref mut v) => v.push(Condition::Is(op))
@@ -167,25 +167,25 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
     // }
 }
 
-pub struct QueryExecutor<'a, F: PageFile, A: Allocator + Clone> {
+pub struct QueryExecutor<'a, F: PageFile, A: Allocator + Clone, N: ToName> {
     table_buf: &'a mut PageBuffer<A>,
     tmp_buf: &'a mut PageBuffer<A>,
     cursor: Cursor<'a, A>,
-    query: Query<'a, A>,
+    query: Query<'a, A, N>,
     is_ran: bool,
     payload: Vec<u8, A>,
     row: Row<'a, A>,
     page_rw: &'a PageRW<F>
 }
 
-impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
+impl <'a, F: PageFile, A: Allocator + Clone, N: ToName> QueryExecutor<'a, F, A, N> {
     pub fn new(
-        query: Query<'a, A>,
+        query: Query<'a, A, N>,
         table_buf: &'a mut PageBuffer<A>,
         tmp_buf: &'a mut PageBuffer<A>,
         cursor_buf: &'a mut PageBuffer<A>,
         page_rw: &'a PageRW<F>
-    ) -> Result<QueryExecutor<'a, F, A>, Error<F::Error>> {
+    ) -> Result<Self, Error<F::Error>> {
         let _ = page_rw.read_page(query.target_table, table_buf.as_mut())?;
         let table = unsafe { as_ref!(table_buf, Table) };
         let cursor = Cursor::new(table, cursor_buf, page_rw)?;
@@ -205,7 +205,7 @@ impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
     fn load_col<'b, E: core::fmt::Debug>(
         table: &Table,
         row: &'b [Value],
-        col: &Name,
+        col: &N,
     ) -> Result<&'b Value<'b>, Error<E>> {
         let idx = table
             .get_col_idx_by_name_ref(col)
@@ -214,7 +214,7 @@ impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
     }
 
     fn eval_operator<'b, E: core::fmt::Debug>(
-        operator: &Op,
+        operator: &Op<'b, N>,
         table: &Table,
         row: &'b [Value],
     ) -> Result<bool, Error<E>> {
@@ -232,13 +232,7 @@ impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
         }
     }
 
-    pub fn count(
-        &mut self,
-        tmp_buf: &mut PageBuffer<A>,
-        payload: &mut Vec<u8, A>,
-        row: &mut Row<'a, A>,
-        page_rw: &PageRW<F>,
-    ) -> Result<usize, Error<F::Error>> {
+    pub fn count(&mut self) -> Result<usize, Error<F::Error>> {
         let mut count = 0;
 
         loop {
@@ -278,7 +272,7 @@ impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
                  OverflowPage::read_all(self.page_rw, cell.header.payload_overflow, payload, self.tmp_buf)?;
             }
 
-            serde_row::deserialize(target_table, row, &payload.as_slice()[0..]);
+            serde_row::deserialize(target_table, row, &payload.as_slice());
 
             match &self.query.filters {
                 TopLevelOperator::And(conditions) => {

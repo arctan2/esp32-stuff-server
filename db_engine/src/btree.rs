@@ -82,23 +82,25 @@ pub struct BtreePage {
     pub data: [u8; PAGE_SIZE - size_of::<NodeType>()]
 }
 
-const LEAF_META_SIZE: usize = size_of::<NodeType>() + size_of::<u32>() + size_of::<u16>();
+const LEAF_META_SIZE: usize = size_of::<NodeType>() + size_of::<u32>() + size_of::<u16>() + size_of::<u8>();
 #[derive(Debug)]
 #[repr(C, packed)]
 pub struct BtreeLeaf {
     pub node_type: NodeType,
     pub key_count: u16,
     pub next_leaf: u32,
+    pub _padding: u8,
     pub data: [u8; PAGE_SIZE - LEAF_META_SIZE]
 }
 
-const INTERNAL_META_SIZE: usize = size_of::<NodeType>() + size_of::<u32>() + size_of::<u16>();
+const INTERNAL_META_SIZE: usize = size_of::<NodeType>() + size_of::<u32>() + size_of::<u16>() + size_of::<u8>();
 #[derive(Debug)]
 #[repr(C, packed)]
 pub struct BtreeInternal {
     pub node_type: NodeType,
     pub left_child: u32,
     pub key_count: u16,
+    pub _padding: u8,
     pub data: [u8; PAGE_SIZE - INTERNAL_META_SIZE]
 }
 
