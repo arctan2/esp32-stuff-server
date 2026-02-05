@@ -1,3 +1,6 @@
+#[cfg(feature = "std")]
+extern crate std;
+
 use std::fmt::Debug;
 use embedded_sdmmc::{BlockDevice, Block, BlockIdx, BlockCount};
 use std::sync::Mutex;
@@ -5,7 +8,7 @@ use std::sync::Mutex;
 pub const BLOCK_SIZE: usize = 512;
 pub const SD_BUF_SIZE: usize = 64 * 1024 * 1024;
 pub const SD_BLOCK_COUNT: u32 = (SD_BUF_SIZE / BLOCK_SIZE) as u32;
-static SD_BUF: Mutex<[u8; SD_BUF_SIZE]> = Mutex::new(*include_bytes!("../fat32.img"));
+static SD_BUF: Mutex<[u8; SD_BUF_SIZE]> = Mutex::new(*include_bytes!("../../fat32.img"));
 
 #[derive(Debug)]
 pub enum RamBlockDeviceError {

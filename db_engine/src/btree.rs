@@ -1,4 +1,11 @@
 #![allow(unused)]
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(feature = "std")]
+use std::{println, print};
+
 use core::mem::size_of;
 use crate::page_rw::{PAGE_SIZE};
 use crate::fs::{PageFile};
@@ -278,6 +285,7 @@ impl <'a> InternalCellView<'a> {
         return s;
     }
 
+    #[cfg(feature = "std")]
     pub fn print(&self) {
         println!("InternalCellView {{ child: {}, key = {:?} }}", {self.header.child}, self.key());
     }
@@ -560,6 +568,7 @@ impl BtreeInternal {
         }
     }
 
+    #[cfg(feature = "std")]
     pub fn print<'a>(&'a self) {
         let ptr = self.data.as_ptr();
         let offsets: &[u16] = unsafe {

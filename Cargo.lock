@@ -269,6 +269,7 @@ name = "db_engine"
 version = "0.1.0"
 dependencies = [
  "allocator-api2",
+ "buddy_system_allocator",
  "embedded-sdmmc",
  "rand",
  "serde",

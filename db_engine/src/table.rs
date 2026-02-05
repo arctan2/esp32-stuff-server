@@ -14,7 +14,7 @@ impl ToName for str {
     fn to_name(&self) -> Name {
         let mut buffer = [0u8; NAME_MAX_LEN];
         let src = self.as_bytes();
-        let len = std::cmp::min(src.len(), NAME_MAX_LEN);
+        let len = core::cmp::min(src.len(), NAME_MAX_LEN);
         buffer[..len].copy_from_slice(&src[..len]);
         buffer
     }

@@ -1,3 +1,9 @@
+#[cfg(feature = "std")]
+extern crate std;
+
+use std::boxed::Box;
+use std::vec;
+
 use allocator_api2::alloc::{Allocator, AllocError, Layout};
 use std::ptr::NonNull;
 use buddy_system_allocator::LockedHeap;

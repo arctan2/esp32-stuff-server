@@ -77,6 +77,7 @@ where
         Ok(())
     }
 
+    #[allow(unused)]
     fn wal_read_header<A: Allocator + Clone>(
         &mut self,
         buf: &mut PageBuffer<A>,
@@ -101,6 +102,7 @@ where
         Ok(())
     }
 
+    #[allow(unused)]
     fn wal_read_write_page_to_file<A: Allocator + Clone>(
         &mut self,
         page: u32,

@@ -1,3 +1,9 @@
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(feature = "std")]
+use std::println;
+
 use allocator_api2::alloc::Allocator;
 use crate::btree;
 use crate::btree::{BtreeLeaf, PayloadCellView, Key};
@@ -106,7 +112,10 @@ where
     F: PageFile,
     A: Allocator + Clone
 {
-    pub fn new_init<'a, D: DbDir<'a, Error = F::Error, File<'a> = F> + 'a>(dir: &'a D, allocator: A) -> Result<Self, Error<F::Error>> {
+    pub fn new_init<'a, D: DbDir<'a, Error = F::Error, File<'a> = F> + 'a>(
+        dir: &'a D,
+        allocator: A
+    ) -> Result<Self, Error<F::Error>> {
         let file_handler = FileHandler::new()?;
         let mut db = Self {
             file_handler: file_handler,
@@ -125,21 +134,27 @@ where
             db.create_new_db(header)?;
         }
 
+
         Ok(db)
     }
 
-    pub fn close<'a, D: DbDir<'a, Error = F::Error, File<'a> = F> + 'a>(&mut self, dir: &'a D) -> Result<(), Error<F::Error>> {
+    pub fn close<'a, D: DbDir<'a, Error = F::Error, File<'a> = F> + 'a>(
+        &mut self,
+        dir: &'a D
+    ) -> Result<(), Error<F::Error>> {
         self.file_handler.close(dir)
     }
 
     fn get_or_create_header(&mut self) -> Result<DBHeader, Error<F::Error>> {
-        let count = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.read_page(FixedPages::Header.into(), self.buf1.as_mut())?;
+        let count = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?
+                    .read_page(FixedPages::Header.into(), self.buf1.as_mut())?;
         if count == 0 {
             let header = DBHeader::default();
             unsafe {
                 self.buf1.write(0, &header);
             }
-            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
+            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?
+                .write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
         }
         return unsafe {
             Ok(self.buf1.read::<DBHeader>(0))
@@ -150,7 +165,8 @@ where
         header.page_count = 2;
         unsafe {
             self.buf1.write(0, &header);
-            let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
+            let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?
+                    .write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
         }
         let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.extend_file_by_pages(1, self.buf1.as_mut())?;
         let tbl_name = Column::new("tbl_name".to_name(), ColumnType::Chars).primary();
@@ -176,7 +192,10 @@ where
         }
 
         if table.rows_btree_page == 0 {
-            let free_page = unsafe { get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)? };
+            let free_page = unsafe {
+                get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)?
+            };
+
             table.rows_btree_page = free_page;
             self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(table_page, self.table_buf.as_ref())?;
             let btree_leaf = unsafe { as_ref_mut!(self.buf1, BtreeLeaf) }; 
@@ -186,10 +205,18 @@ where
 
         let serialized_row = serde_row::serialize(table, &row, allocator.clone())?;
 
-        PayloadCellView::new_to_buf(table, self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, serialized_row, &mut self.buf1, &mut self.buf2)?;
+        PayloadCellView::new_to_buf(
+            table, self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?,
+            serialized_row, &mut self.buf1, &mut self.buf2
+        )?;
+
         let payload_cell = PayloadCellView::new(table, self.buf1.as_ref(), 0);
         let mut path = Vec::new_in(allocator.clone());
-        let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, payload_cell.key(), self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut path)?;
+        let leaf_page = btree::traverse_to_leaf_with_path(
+            table, &mut self.buf2, payload_cell.key(),
+            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?,
+            &mut path
+        )?;
 
         self.file_handler.wal_begin_write(&mut self.buf2)?; {
             self.file_handler.wal_append_pages_vec(&path, &mut self.buf2)?;
@@ -222,7 +249,11 @@ where
         key.to_key(&mut self.buf1);
         let key = unsafe { as_ref!(self.buf1, Key) };
         let mut path: Vec<u32, A> = Vec::new_in(allocator.clone());
-        let leaf_page = btree::traverse_to_leaf_with_path(table, &mut self.buf2, key, self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut path)?;
+        let leaf_page = btree::traverse_to_leaf_with_path(
+            table, &mut self.buf2, key,
+            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?,
+            &mut path
+        )?;
 
         btree::delete_payload_from_leaf(
             &mut self.buf1, &mut self.buf2,
@@ -248,7 +279,10 @@ where
         let db_cat_page = FixedPages::DbCat.into();
         let query = Query::new(db_cat_page, allocator.clone()).key(Value::Chars(&name));
 
-        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf1, &mut self.buf2, self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?)?;
+        let mut exec = QueryExecutor::new(
+            query, &mut self.table_buf, &mut self.buf1, &mut self.buf2,
+            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?
+        )?;
 
         let row = exec.next()?;
 
@@ -258,11 +292,15 @@ where
         };
     }
 
+    #[cfg(feature = "std")]
     pub fn print_all_table(&mut self, allocator: A) {
         let db_cat_page = FixedPages::DbCat.into();
         let query = Query::new(db_cat_page, allocator.clone());
 
-        let mut exec = QueryExecutor::new(query, &mut self.table_buf, &mut self.buf2, &mut self.buf1, self.file_handler.page_rw.as_ref().unwrap()).unwrap();
+        let mut exec = QueryExecutor::new(
+            query, &mut self.table_buf, &mut self.buf2, &mut self.buf1,
+            self.file_handler.page_rw.as_ref().unwrap()
+        ).unwrap();
         while let Ok(row) = exec.next() {
             println!("table = {:?}", row);
         }
@@ -294,14 +332,5 @@ where
     pub fn add_column(&mut self, col: Column) -> Result<(), Error<F::Error>> {
         let table = unsafe { as_ref_mut!(self.table_buf, Table) };
         table.add_column(col)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn insert_single_row() {
     }
 }
