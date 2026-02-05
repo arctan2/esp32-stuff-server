@@ -1,7 +1,7 @@
 use crate::page_rw::{PageRW, PAGE_SIZE};
+use crate::fs::PageFile;
 use crate::db::{Error, DBHeader, FixedPages};
-use crate::types::PageBuffer;
-use embedded_sdmmc::{BlockDevice, TimeSource};
+use crate::page_buf::PageBuffer;
 use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::{as_ref_mut};
@@ -17,15 +17,10 @@ pub struct PageFreeList {
 }
 
 impl PageFreeList {
-    pub unsafe fn get_free_page<
-        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub unsafe fn get_free_page<F: PageFile, A: Allocator + Clone>(
         buf: &mut PageBuffer<A>,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<u32, Error<D::Error>> {
+        page_rw: &PageRW<F>
+    ) -> Result<u32, Error<F::Error>> {
         unsafe {
             let mut prev_page = 0;
             let mut cur_page = 1;
@@ -43,7 +38,7 @@ impl PageFreeList {
             if prev_page == 0 {
                 if cur.page_count == 0 {
                     page = page_rw.extend_file_by_pages(1, buf.as_mut())?;
-                    DBHeader::inc_page_count::<D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>(buf.as_mut(), page_rw)?;
+                    DBHeader::inc_page_count(buf.as_mut(), page_rw)?;
                     buf.as_mut().fill(0);
                 } else {
                     page = cur.pages[0];
@@ -70,16 +65,11 @@ impl PageFreeList {
         }
     }
 
-    pub unsafe fn add_page_to_list<
-        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub unsafe fn add_page_to_list<F: PageFile, A: Allocator + Clone>(
         buf: &mut PageBuffer<A>,
         page_num: u32,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<(), Error<D::Error>> {
+        page_rw: &PageRW<F>
+    ) -> Result<(), Error<F::Error>> {
         unsafe {
             let mut cur_page = 1;
             let _ = page_rw.read_page(FixedPages::FreeList.into(), buf.as_mut())?;

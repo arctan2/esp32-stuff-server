@@ -1,17 +1,19 @@
 #![allow(unused)]
 use core::mem::size_of;
-use crate::page_rw::PAGE_SIZE;
+use crate::page_rw::{PAGE_SIZE};
+use crate::fs::{PageFile};
 use core::cmp::Ordering;
-use crate::types::{PageBuffer, PageBufferWriter, PageBufferReader};
+use crate::page_buf::{PageBuffer, PageBufferWriter, PageBufferReader};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
-use crate::{as_ref, as_ref_mut, PageRW, get_free_page, add_page_to_free_list, PageFreeList};
+use crate::{as_ref, as_ref_mut, get_free_page, add_page_to_free_list};
+use crate::page_free_list::PageFreeList;
+use crate::page_rw::PageRW;
 use crate::table::{Table};
 use crate::serde_row::{Value, SerializedRow};
 use crate::overflow::OverflowPage;
 use crate::db::{Error};
 use crate::buffer;
-use embedded_sdmmc::{BlockDevice, TimeSource};
 
 /*
 db_cat(primary_key db_name: char[32], page: int)
@@ -234,18 +236,13 @@ impl <'a> PayloadCellView<'a> {
         }
     }
 
-    pub fn new_to_buf<
-        D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub fn new_to_buf<F: PageFile, A: Allocator + Clone>(
         table: &Table,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+        page_rw: &PageRW<F>,
         row: SerializedRow<A>,
         buf: &mut PageBuffer<A>,
         overflow_buf: &mut PageBuffer<A>,
-    ) -> Result<(), Error<D::Error>> {
+    ) -> Result<(), Error<F::Error>> {
         let mut buf_writer = PageBufferWriter::new(buf);
         let payload_len: u32 = row.payload.len() as u32;
         let mut inline_len: u32 = payload_len;
@@ -305,17 +302,12 @@ impl <'a> InternalCellView<'a> {
         }
     }
 
-    pub fn new_to_buf<
-        D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    pub fn new_to_buf<F: PageFile, A: Allocator + Clone>(
+        page_rw: &PageRW<F>,
         buf: &mut PageBuffer<A>,
         child: u32,
         key: &Key,
-    ) -> Result<(), Error<D::Error>> {
+    ) -> Result<(), Error<F::Error>> {
         let mut buf_writer = PageBufferWriter::new(buf);
         buf_writer.write(&child);
         buf_writer.write_slice(key.as_bytes());
@@ -616,17 +608,12 @@ impl BtreeInternal {
     }
 }
 
-pub fn set_child_next_leaf<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn set_child_next_leaf<'a, F: PageFile, A: Allocator + Clone>(
     tmp_buf: &'a mut PageBuffer<A>,
     child: u32,
     next_leaf: u32,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<(), Error<D::Error>> {
+    page_rw: &PageRW<F>,
+) -> Result<(), Error<F::Error>> {
     let _ = page_rw.read_page(child, tmp_buf.as_mut())?;
     let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
     leaf.next_leaf = next_leaf;
@@ -634,23 +621,18 @@ pub fn set_child_next_leaf<
     Ok(())
 }
 
-pub fn promote_key_iter<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn promote_key_iter<'a, F: PageFile, A: Allocator + Clone>(
     promoted_key_buf: &mut PageBuffer<A>,
     buf1: &'a mut PageBuffer<A>,
     buf2: &mut PageBuffer<A>,
     buf3: &mut PageBuffer<A>,
     table: &mut Table,
     mut path: Vec<u32, A>,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     mut left: u32,
     mut right: u32,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), Error<F::Error>> {
     let mut is_first_iter = true;
     loop {
         let promoted_key = unsafe { as_ref!(promoted_key_buf, Key) };
@@ -751,23 +733,18 @@ pub fn promote_key_iter<
     return Ok(());
 }
 
-pub fn split_leaf_iter<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn split_leaf_iter<'a, F: PageFile, A: Allocator + Clone>(
     payload_cell_buf: &mut PageBuffer<A>,
     leaf_buf: &mut PageBuffer<A>,
     tmp_buf1: &mut PageBuffer<A>,
     tmp_buf2: &mut PageBuffer<A>,
     leaf_page: u32,
     table: &mut Table,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     mut path: Vec<u32, A>,
     cells: BtreeCells<'a, A>,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), Error<F::Error>> {
     // you have be careful here because everything here is literally the spiderman pointing each other meme
     // * cells references leaf_buf
     // * atleast 1 cell reference payload_cell_buf
@@ -808,22 +785,17 @@ pub fn split_leaf_iter<
     );
 }
 
-pub fn insert_payload_to_leaf<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn insert_payload_to_leaf<'a, F: PageFile, A: Allocator + Clone>(
     payload_cell_buf: &mut PageBuffer<A>,
     leaf_buf: &mut PageBuffer<A>,
     tmp_buf1: &mut PageBuffer<A>,
     tmp_buf2: &mut PageBuffer<A>,
     leaf_page: u32,
     table: &mut Table,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     mut path: Vec<u32, A>,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), Error<F::Error>> {
     let view = PayloadCellView::new_unsafe(table, unsafe { payload_cell_buf.as_ptr(0) }, PAGE_SIZE, 0);
     let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
     let leaf = unsafe { as_ref!(leaf_buf, BtreeLeaf) };
@@ -855,20 +827,15 @@ pub fn insert_payload_to_leaf<
     Ok(())
 }
 
-pub fn delete_shift_iter<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn delete_shift_iter<'a, F: PageFile, A: Allocator + Clone>(
     tmp_buf1: &mut PageBuffer<A>,
     tmp_buf2: &mut PageBuffer<A>,
     leaf_page: u32,
     table: &mut Table,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     mut path: Vec<u32, A>,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), Error<F::Error>> {
     let mut removed_page = leaf_page;
 
     while path.len() > 0 {
@@ -907,22 +874,17 @@ pub fn delete_shift_iter<
     Ok(())
 }
 
-pub fn delete_payload_from_leaf<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn delete_payload_from_leaf<'a, F: PageFile, A: Allocator + Clone>(
     key_buf: &mut PageBuffer<A>,
     leaf_buf: &mut PageBuffer<A>,
     tmp_buf1: &mut PageBuffer<A>,
     tmp_buf2: &mut PageBuffer<A>,
     leaf_page: u32,
     table: &mut Table,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     mut path: Vec<u32, A>,
     allocator: A
-) -> Result<(), Error<D::Error>> {
+) -> Result<(), Error<F::Error>> {
     let _ = page_rw.read_page(leaf_page, leaf_buf.as_mut())?;
     let leaf = unsafe { as_ref!(leaf_buf, BtreeLeaf) };
     let key = unsafe { as_ref!(key_buf, Key) };
@@ -964,18 +926,13 @@ pub fn delete_payload_from_leaf<
     Ok(())
 }
 
-pub fn traverse_to_leaf_with_path<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn traverse_to_leaf_with_path<'a, F: PageFile, A: Allocator + Clone>(
     table: &Table,
     tmp_buf: &mut PageBuffer<A>,
     key: &Key,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    page_rw: &PageRW<F>,
     path: &mut Vec<u32, A>
-) -> Result<u32, Error<D::Error>> {
+) -> Result<u32, Error<F::Error>> {
     let mut cur_page = table.rows_btree_page;
     if cur_page == 0 {
         return Err(Error::TableEmpty);
@@ -995,17 +952,12 @@ pub fn traverse_to_leaf_with_path<
     return Ok(cur_page);
 }
 
-pub fn traverse_to_leaf<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn traverse_to_leaf<'a, F: PageFile, A: Allocator + Clone>(
     table: &Table,
     tmp_buf: &mut PageBuffer<A>,
     key: &Key,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<u32, Error<D::Error>> {
+    page_rw: &PageRW<F>,
+) -> Result<u32, Error<F::Error>> {
     let mut cur_page = table.rows_btree_page;
     if cur_page == 0 {
         return Err(Error::TableEmpty);
@@ -1024,17 +976,12 @@ pub fn traverse_to_leaf<
     return Ok(cur_page);
 }
 
-pub fn find_by_key<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn find_by_key<'a, F: PageFile, A: Allocator + Clone>(
     table: &Table,
     tmp_buf: &mut PageBuffer<A>,
     key: &Key,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<PayloadCellView<'a>, Error<D::Error>> {
+    page_rw: &PageRW<F>,
+) -> Result<PayloadCellView<'a>, Error<F::Error>> {
     let _ = traverse_to_leaf(table, tmp_buf, key, page_rw)?;
     let leaf = unsafe { as_ref_mut!(tmp_buf, BtreeLeaf) };
 
@@ -1044,16 +991,11 @@ pub fn find_by_key<
     };
 }
 
-pub fn traverse_to_left_most<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
->(
+pub fn traverse_to_left_most<'a, F: PageFile, A: Allocator + Clone>(
     table: &Table,
     tmp_buf: &mut PageBuffer<A>,
-    page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-) -> Result<u32, Error<D::Error>> {
+    page_rw: &PageRW<F>,
+) -> Result<u32, Error<F::Error>> {
     let mut cur_page = table.rows_btree_page;
     if cur_page == 0 {
         return Err(Error::TableEmpty);
@@ -1078,16 +1020,11 @@ pub struct Cursor<'a, A: Allocator + Clone> {
 }
 
 impl <'a, A: Allocator + Clone> Cursor<'a, A> {
-    pub fn new<
-        D: BlockDevice, T: TimeSource,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub fn new<F: PageFile>(
         table: &Table,
         buf: &'a mut PageBuffer<A>,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<Self, Error<D::Error>> {
+        page_rw: &PageRW<F>
+    ) -> Result<Self, Error<F::Error>> {
         let left_most_page = traverse_to_left_most(table, buf, page_rw)?;
 
         Ok(Self {
@@ -1097,16 +1034,11 @@ impl <'a, A: Allocator + Clone> Cursor<'a, A> {
         })
     }
 
-    pub fn next<
-        D: BlockDevice, T: TimeSource,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
+    pub fn next<F: PageFile>(
         &mut self,
         table: &Table,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<PayloadCellView<'_>, Error<D::Error>> {
+        page_rw: &PageRW<F>
+    ) -> Result<PayloadCellView<'_>, Error<F::Error>> {
         let mut leaf = unsafe { as_ref!(self.buf, BtreeLeaf) };
         if self.cur_idx >= leaf.key_count as usize {
             if leaf.next_leaf == 0 {

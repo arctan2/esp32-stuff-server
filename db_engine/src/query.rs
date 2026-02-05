@@ -1,12 +1,12 @@
 #![allow(unused)]
 
-use embedded_sdmmc::{BlockDevice, TimeSource};
 use allocator_api2::alloc::Allocator;
 use crate::btree;
 use crate::btree::{Cursor, Key};
 use crate::table::{Table, Name};
-use crate::PageRW;
-use crate::types::PageBuffer;
+use crate::page_rw::{PageRW};
+use crate::fs::{PageFile};
+use crate::page_buf::PageBuffer;
 use crate::overflow::OverflowPage;
 use crate::{as_ref};
 use allocator_api2::vec::Vec;
@@ -167,12 +167,7 @@ impl <'a, A> Query<'a, A> where A: Allocator + Clone {
     // }
 }
 
-pub struct QueryExecutor<
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
-> {
+pub struct QueryExecutor<'a, F: PageFile, A: Allocator + Clone> {
     table_buf: &'a mut PageBuffer<A>,
     tmp_buf: &'a mut PageBuffer<A>,
     cursor: Cursor<'a, A>,
@@ -180,22 +175,17 @@ pub struct QueryExecutor<
     is_ran: bool,
     payload: Vec<u8, A>,
     row: Row<'a, A>,
-    page_rw: &'a PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+    page_rw: &'a PageRW<F>
 }
 
-impl <
-    'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-    const MAX_DIRS: usize,
-    const MAX_FILES: usize,
-    const MAX_VOLUMES: usize
-> QueryExecutor<'a, D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES> {
+impl <'a, F: PageFile, A: Allocator + Clone> QueryExecutor<'a, F, A> {
     pub fn new(
         query: Query<'a, A>,
         table_buf: &'a mut PageBuffer<A>,
         tmp_buf: &'a mut PageBuffer<A>,
         cursor_buf: &'a mut PageBuffer<A>,
-        page_rw: &'a PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
-    ) -> Result<QueryExecutor<'a, D, T, A, MAX_DIRS, MAX_FILES, MAX_VOLUMES>, Error<D::Error>> {
+        page_rw: &'a PageRW<F>
+    ) -> Result<QueryExecutor<'a, F, A>, Error<F::Error>> {
         let _ = page_rw.read_page(query.target_table, table_buf.as_mut())?;
         let table = unsafe { as_ref!(table_buf, Table) };
         let cursor = Cursor::new(table, cursor_buf, page_rw)?;
@@ -247,8 +237,8 @@ impl <
         tmp_buf: &mut PageBuffer<A>,
         payload: &mut Vec<u8, A>,
         row: &mut Row<'a, A>,
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-    ) -> Result<usize, Error<D::Error>> {
+        page_rw: &PageRW<F>,
+    ) -> Result<usize, Error<F::Error>> {
         let mut count = 0;
 
         loop {
@@ -262,7 +252,7 @@ impl <
         }
     }
 
-    pub fn next(&mut self) -> Result<&mut Row<'a, A>, Error<D::Error>> {
+    pub fn next(&mut self) -> Result<&mut Row<'a, A>, Error<F::Error>> {
         let _ = self.page_rw.read_page(self.query.target_table, self.table_buf.as_mut())?;
         let target_table = unsafe { as_ref!(self.table_buf, Table) };
         let payload = &mut self.payload;

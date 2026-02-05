@@ -1,10 +1,11 @@
 use core::mem::size_of;
-use crate::page_rw::PAGE_SIZE;
+use crate::page_rw::{PAGE_SIZE, PageRW};
+use crate::page_free_list::PageFreeList;
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
-use embedded_sdmmc::{BlockDevice, TimeSource};
-use crate::{get_free_page, as_ref_mut, as_ref, PageRW, PageFreeList};
-use crate::types::{PageBuffer};
+use crate::{get_free_page, as_ref_mut, as_ref};
+use crate::page_buf::{PageBuffer};
+use crate::fs::{PageFile};
 use crate::db::Error;
 
 pub struct OverflowPage {
@@ -13,16 +14,11 @@ pub struct OverflowPage {
 }
 
 impl OverflowPage {
-    pub fn new_overflow_list<
-        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    > (
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    pub fn new_overflow_list<'a, F: PageFile, A: Allocator + Clone> (
+        page_rw: &PageRW<F>,
         slice: &'a [u8],
         buf: &mut PageBuffer<A>,
-    ) -> Result<u32, Error<D::Error>> {
+    ) -> Result<u32, Error<F::Error>> {
         unsafe {
             let new_page = get_free_page!(page_rw, buf)?;
             let mut cur_page = new_page;
@@ -54,17 +50,12 @@ impl OverflowPage {
         }
     }
 
-     pub fn read_all<
-        'a, D: BlockDevice, T: TimeSource, A: Allocator + Clone,
-        const MAX_DIRS: usize,
-        const MAX_FILES: usize,
-        const MAX_VOLUMES: usize
-    >(
-        page_rw: &PageRW<'a, D, T, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+     pub fn read_all<'a, F: PageFile, A: Allocator + Clone>(
+        page_rw: &PageRW<F>,
         mut page_num: u32,
         v: &mut Vec<u8, A>,
         buf: &mut PageBuffer<A>,
-    ) -> Result<(), Error<D::Error>> {
+    ) -> Result<(), Error<F::Error>> {
         unsafe {
             let mut remaining = v.capacity();
 

@@ -123,3 +123,4 @@ impl<'a> PageBufferReader<'a> {
         return buffer::as_slice(self.buf, off, len);
     }
 }
+

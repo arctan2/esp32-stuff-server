@@ -17,3 +17,4 @@ tokio = { version = "1.49.0", features = ["full"] }
 embedded-sdmmc = "0.9.0"
 buddy_system_allocator = "0.12.0"
 db_engine = { path = "../db_engine" }
+rand = "0.9.2"

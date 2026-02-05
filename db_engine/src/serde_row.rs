@@ -1,5 +1,5 @@
 use allocator_api2::alloc::Allocator;
-use crate::types::{PageBufferReader, PageBufferWriter, PageBuffer};
+use crate::page_buf::{PageBufferReader, PageBufferWriter, PageBuffer};
 use allocator_api2::vec::Vec;
 use crate::btree::{Key};
 use crate::{as_ref};

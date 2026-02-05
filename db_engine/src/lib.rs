@@ -1,15 +1,18 @@
 pub mod db;
-mod types;
-mod page_rw;
-mod page_free_list;
+pub mod page_buf;
+pub mod fs;
+pub mod page_rw;
 pub mod table;
+
+mod page_free_list;
 mod macros;
 mod btree;
 mod overflow;
 mod buffer;
 mod serde_row;
 mod query;
-mod wal;
+mod file_handler;
 
-pub use page_rw::PageRW;
-pub use page_free_list::PageFreeList;
+pub use table::{Column, ColumnType, Name, ToName};
+pub use query::{Query, QueryExecutor};
+pub use serde_row::{Row, Value};
