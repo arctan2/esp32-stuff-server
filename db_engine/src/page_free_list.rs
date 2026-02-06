@@ -6,6 +6,9 @@ use allocator_api2::alloc::Allocator;
 use core::mem::size_of;
 use crate::{as_ref_mut};
 
+#[cfg(feature = "std")]
+extern crate std;
+
 const PAGES_LIST_SIZE: usize = (PAGE_SIZE / size_of::<u32>()) - (size_of::<u32>() * 2);
 
 #[derive(Debug)]
@@ -21,48 +24,46 @@ impl PageFreeList {
         buf: &mut PageBuffer<A>,
         page_rw: &PageRW<F>
     ) -> Result<u32, Error<F::Error>> {
-        unsafe {
-            let mut prev_page = 0;
-            let mut cur_page = 1;
-            let _ = page_rw.read_page(FixedPages::FreeList.into(), buf.as_mut())?;
-            let mut cur = as_ref_mut!(buf, PageFreeList);
+        let mut prev_page = 0;
+        let mut cur_page = 1;
+        let _ = page_rw.read_page(FixedPages::FreeList.into(), buf.as_mut())?;
+        let mut cur = unsafe { as_ref_mut!(buf, PageFreeList) };
 
-            while cur.next_page != 0 {
-                prev_page = cur_page;
-                cur_page = cur.next_page;
-                let _ = page_rw.read_page(cur_page, buf.as_mut())?;
-                cur = as_ref_mut!(buf, PageFreeList);
-            }
-
-            let page: u32;
-            if prev_page == 0 {
-                if cur.page_count == 0 {
-                    page = page_rw.extend_file_by_pages(1, buf.as_mut())?;
-                    DBHeader::inc_page_count(buf.as_mut(), page_rw)?;
-                    buf.as_mut().fill(0);
-                } else {
-                    page = cur.pages[0];
-                    cur.pages[0] = cur.pages[(cur.page_count - 1) as usize];
-                    cur.page_count -= 1;
-                }
-            } else {
-                if cur.page_count == 0 {
-                    page = cur_page;
-                    cur_page = prev_page;
-                    let _ = page_rw.read_page(prev_page, buf.as_mut())?;
-                    cur = as_ref_mut!(buf, PageFreeList);
-                    cur.next_page = 0;
-                } else {
-                    page = cur.pages[0];
-                    cur.pages[0] = cur.pages[(cur.page_count - 1) as usize];
-                    cur.page_count -= 1;
-                }
-            }
-
-            let _ = page_rw.write_page(cur_page, buf.as_ref())?;
-            buf.as_mut().fill(0);
-            Ok(page)
+        while cur.next_page != 0 {
+            prev_page = cur_page;
+            cur_page = cur.next_page;
+            let _ = page_rw.read_page(cur_page, buf.as_mut())?;
+            cur = unsafe { as_ref_mut!(buf, PageFreeList) };
         }
+
+        let page: u32;
+        if prev_page == 0 {
+            if cur.page_count == 0 {
+                page = page_rw.extend_file_one_page(DBHeader::get_page_count(buf, page_rw)?, buf.as_mut())?;
+                DBHeader::inc_page_count(buf, page_rw)?;
+                buf.as_mut().fill(0);
+            } else {
+                page = cur.pages[0];
+                cur.pages[0] = cur.pages[(cur.page_count - 1) as usize];
+                cur.page_count -= 1;
+            }
+        } else {
+            if cur.page_count == 0 {
+                page = cur_page;
+                cur_page = prev_page;
+                let _ = page_rw.read_page(prev_page, buf.as_mut())?;
+                cur = unsafe { as_ref_mut!(buf, PageFreeList) };
+                cur.next_page = 0;
+            } else {
+                page = cur.pages[0];
+                cur.pages[0] = cur.pages[(cur.page_count - 1) as usize];
+                cur.page_count -= 1;
+            }
+        }
+
+        let _ = page_rw.write_page(cur_page, buf.as_ref())?;
+        buf.as_mut().fill(0);
+        Ok(page)
     }
 
     pub unsafe fn add_page_to_list<F: PageFile, A: Allocator + Clone>(
@@ -70,29 +71,27 @@ impl PageFreeList {
         page_num: u32,
         page_rw: &PageRW<F>
     ) -> Result<(), Error<F::Error>> {
-        unsafe {
-            let mut cur_page = 1;
-            let _ = page_rw.read_page(FixedPages::FreeList.into(), buf.as_mut())?;
-            let mut cur = as_ref_mut!(buf, PageFreeList);
-            loop {
-                if cur.page_count < (PAGES_LIST_SIZE as u32) || cur.next_page == 0 {
-                    break;
-                }
-                cur_page = cur.next_page;
-                let _ = page_rw.read_page(cur.next_page, buf.as_mut())?;
-                cur = as_ref_mut!(buf, PageFreeList);
+        let mut cur_page = 1;
+        let _ = page_rw.read_page(FixedPages::FreeList.into(), buf.as_mut())?;
+        let mut cur = unsafe { as_ref_mut!(buf, PageFreeList) };
+        loop {
+            if cur.page_count < (PAGES_LIST_SIZE as u32) || cur.next_page == 0 {
+                break;
             }
-
-            if cur.page_count < (PAGES_LIST_SIZE as u32) {
-                cur.pages[cur.page_count as usize] = page_num;
-                cur.page_count += 1;
-            } else {
-                cur.next_page = page_num;
-            }
-            let _ = page_rw.write_page(cur_page, buf.as_ref())?;
-            buf.as_mut().fill(0);
-            let _ = page_rw.write_page(page_num, buf.as_ref())?;
+            cur_page = cur.next_page;
+            let _ = page_rw.read_page(cur.next_page, buf.as_mut())?;
+            cur = unsafe { as_ref_mut!(buf, PageFreeList) };
         }
+
+        if cur.page_count < (PAGES_LIST_SIZE as u32) {
+            cur.pages[cur.page_count as usize] = page_num;
+            cur.page_count += 1;
+        } else {
+            cur.next_page = page_num;
+        }
+        let _ = page_rw.write_page(cur_page, buf.as_ref())?;
+        buf.as_mut().fill(0);
+        let _ = page_rw.write_page(page_num, buf.as_ref())?;
 
         Ok(())
     }

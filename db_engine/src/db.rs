@@ -34,36 +34,6 @@ where
 
 pub const MAGIC: [u8; 8] = *b"_stufff_";
 
-#[derive(Debug)]
-#[repr(packed)]
-#[allow(unused)]
-pub struct DBHeader {
-    magic: [u8; 8],
-    page_count: u32,
-}
-
-impl DBHeader {
-    pub fn inc_page_count<F: PageFile>(
-        buf: &mut [u8; crate::page_rw::PAGE_SIZE],
-        page_rw: &PageRW<F>
-    ) -> Result<(), Error<F::Error>> {
-        let _ = page_rw.read_page(0, buf)?;
-        let header = buf.as_mut_ptr() as *mut DBHeader;
-        unsafe {
-            (*header).page_count += 1;
-        }
-        let _ = page_rw.write_page(0, buf)?;
-        Ok(())
-    }
-
-    pub fn default() -> Self {
-        Self {
-            magic: MAGIC,
-            page_count: 0,
-        }
-    }
-}
-
 #[repr(u32)]
 pub enum FixedPages {
     Header = 0,
@@ -78,9 +48,48 @@ impl From<FixedPages> for u32 {
 }
 
 #[derive(Debug)]
+#[repr(packed)]
+#[allow(unused)]
+pub struct DBHeader {
+    magic: [u8; 8],
+    page_count: u32,
+}
+
+impl DBHeader {
+    pub fn inc_page_count<F: PageFile, A: Allocator + Clone>(
+        buf: &mut PageBuffer<A>,
+        page_rw: &PageRW<F>
+    ) -> Result<(), Error<F::Error>> {
+        let _ = page_rw.read_page(FixedPages::Header.into(), buf.as_mut())?;
+        let header = unsafe { as_ref_mut!(buf, DBHeader) };
+        header.page_count += 1;
+        let _ = page_rw.write_page(FixedPages::Header.into(), buf.as_mut())?;
+        Ok(())
+    }
+
+    pub fn get_page_count<F: PageFile, A: Allocator + Clone>(
+        buf: &mut PageBuffer<A>,
+        page_rw: &PageRW<F>
+    ) -> Result<u32, Error<F::Error>> {
+        let _ = page_rw.read_page(FixedPages::Header.into(), buf.as_mut())?;
+        let header = unsafe { as_ref!(buf, DBHeader) };
+        Ok(header.page_count)
+    }
+
+    pub fn default() -> Self {
+        Self {
+            magic: MAGIC,
+            page_count: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error<E: core::fmt::Debug> {
     FsError(E),
     InitError,
+    InvalidWalFile,
+    WalNotSupported,
     FreeListNotFound,
     HeaderNotFound,
     // query errors
@@ -126,14 +135,12 @@ where
             buf4: PageBuffer::new(allocator.clone()),
         };
 
-
-        db.file_handler.open_with_wal_check(dir)?;
+        db.file_handler.open_with_wal_check(dir, &mut db.buf1)?;
 
         let header = db.get_or_create_header()?;
         if header.page_count == 0 {
             db.create_new_db(header)?;
         }
-
 
         Ok(db)
     }
@@ -168,7 +175,7 @@ where
             let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?
                     .write_page(FixedPages::Header.into(), self.buf1.as_ref())?;
         }
-        let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.extend_file_by_pages(1, self.buf1.as_mut())?;
+        let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.extend_file_one_page(2, self.buf1.as_mut())?;
         let tbl_name = Column::new("tbl_name", ColumnType::Chars).primary();
         let page = Column::new("page", ColumnType::Int);
         self.new_table_begin("db_cat");
@@ -217,6 +224,7 @@ where
             self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?,
             &mut path
         )?;
+
 
         self.file_handler.wal_begin_write(&mut self.buf2)?; {
             self.file_handler.wal_append_pages_vec(&path, &mut self.buf2)?;
@@ -308,20 +316,18 @@ where
     }
 
     pub fn create_table(&mut self, allocator: A) -> Result<u32, Error<F::Error>> {
-        unsafe {
-            let table = as_ref_mut!(self.table_buf, Table);
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
 
-            let free_page = get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)?;
-            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(free_page, self.table_buf.as_ref())?;
+        let free_page = unsafe { get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)? };
+        self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(free_page, self.table_buf.as_ref())?;
 
-            let mut row = Row::new_in(allocator.clone());
-            let name = table.name.clone();
-            row.push(Value::Chars(&name));
-            row.push(Value::Int(free_page as i64));
-            self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
+        let mut row = Row::new_in(allocator.clone());
+        let name = table.name.clone();
+        row.push(Value::Chars(&name));
+        row.push(Value::Int(free_page as i64));
+        self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
 
-            Ok(free_page)
-        }
+        Ok(free_page)
     }
 
     pub fn new_table_begin(&mut self, name: impl ToName) {
@@ -340,19 +346,20 @@ where
 mod test {
     use crate::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource};
     use crate::embedded_sdmmc_ram_device::fs::{DbDirSdmmc};
-    use crate::{Column, ColumnType, Value, Row, ToName, Query, QueryExecutor};
-    use embedded_sdmmc::{VolumeManager};
+    use crate::{Column, ColumnType, Value, Row, Query, QueryExecutor};
+    use embedded_sdmmc::{VolumeManager, BlockDevice};
     use crate::db;
     use crate::Operations;
 
     #[cfg(feature = "std")]
     extern crate std;
 
+    #[cfg(not(feature = "hw_failure_test"))]
     #[test]
     pub fn table_basic_operations() {
         allocators::init_simulated_hardware();
         let sdcard = block_device::FsBlockDevice::new("test_file.db").unwrap();
-        let vol_man = embedded_sdmmc::VolumeManager::new(sdcard, timesource::DummyTimesource);
+        let vol_man = VolumeManager::new(sdcard, timesource::DummyTimesource);
         let volume = vol_man.open_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
         let root_dir = volume.open_root_dir().unwrap();
         let _ = root_dir.make_dir_in_dir("STUFF").unwrap();
@@ -411,6 +418,112 @@ mod test {
 
             assert_eq!(exec.count().unwrap(), 5);
         }
+    }
 
+    fn failure_phase(sdcard: impl BlockDevice + core::panic::UnwindSafe) -> Result<bool, ()> {
+        let ret = std::panic::catch_unwind(|| {
+            let vol_man = VolumeManager::new(sdcard, timesource::DummyTimesource);
+            let volume = vol_man.open_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+            let root_dir = volume.open_root_dir().unwrap();
+            let _ = root_dir.make_dir_in_dir("STUFF").unwrap();
+            let stuff_dir = DbDirSdmmc::new(root_dir.open_dir("STUFF").unwrap());
+            let mut db = db::Database::new_init(&stuff_dir, esp_alloc::ExternalMemory).unwrap();
+
+            let allocator = esp_alloc::ExternalMemory;
+
+            {
+                let col1 = Column::new("col1", ColumnType::Chars).primary();
+                let col2 = Column::new("col2", ColumnType::Int);
+                db.new_table_begin("cool_table");
+                db.add_column(col1).unwrap();
+                db.add_column(col2).unwrap();
+                let _ = db.create_table(allocator.clone()).unwrap();
+            }
+            let cool_table = db.get_table("cool_table", allocator.clone()).unwrap();
+
+            for i in 0..10 {
+                let col1 = std::format!("cool_col1_value_{}", i);
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(col1.as_bytes()));
+                row.push(Value::Int(i as i64));
+                db.insert_to_table(cool_table, row, allocator.clone()).unwrap();
+            }
+        });
+
+        Ok(match ret {
+            Ok(_) => false,
+            Err(_) => true
+        })
+    }
+
+    fn recovery_phase<B: BlockDevice + core::panic::UnwindSafe>(sdcard: B) -> Result<bool, db::Error<B::Error>> {
+        let ret = std::panic::catch_unwind(|| {
+            let vol_man = embedded_sdmmc::VolumeManager::new(sdcard, timesource::DummyTimesource);
+            let volume = vol_man.open_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+            let root_dir = volume.open_root_dir().unwrap();
+            let _ = root_dir.make_dir_in_dir("STUFF");
+            let stuff_dir = DbDirSdmmc::new(root_dir.open_dir("STUFF").unwrap());
+            let mut db = db::Database::new_init(&stuff_dir, esp_alloc::ExternalMemory).unwrap();
+
+            let allocator = esp_alloc::ExternalMemory;
+            let cool_table = db.get_table("cool_table", allocator.clone()).unwrap();
+
+            for i in 2..10 {
+                let col1 = std::format!("cool_col1_value_{}", i);
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(col1.as_bytes()));
+                row.push(Value::Int(i as i64));
+                db.insert_to_table(cool_table, row, allocator.clone()).unwrap();
+            }
+
+            for i in 0..5 {
+                let col1 = std::format!("cool_col1_value_{}", i);
+                db.delete_from_table(cool_table, Value::Chars(col1.as_bytes()), allocator.clone()).unwrap();
+            }
+
+            let cool_table = db.get_table("cool_table", allocator.clone()).unwrap();
+
+            {
+                let query = Query::<_, &str>::new(cool_table, allocator.clone());
+                let mut exec = QueryExecutor::new(
+                    query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                    &db.file_handler.page_rw.as_ref().unwrap()
+                ).unwrap();
+
+                let mut i = 5;
+                while let Ok(row) = exec.next() {
+                    let col1 = std::format!("cool_col1_value_{}", i);
+                    assert_eq!(row[0].eq(&Value::Chars(col1.as_bytes())), true);
+                    assert_eq!(row[1].eq(&Value::Int(i as i64)), true);
+                    i += 1;
+                }
+            }
+
+            {
+                let query = Query::<_, &str>::new(cool_table, allocator.clone());
+                let mut exec = QueryExecutor::new(
+                    query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                    &db.file_handler.page_rw.as_ref().unwrap()
+                ).unwrap();
+
+                assert_eq!(exec.count().unwrap(), 5);
+            }
+        });
+
+        Ok(match ret {
+            Ok(_) => true,
+            Err(_) => false
+        })
+    }
+
+    // this test needs WRITES_REM = 27 and PANICS_REM = 1
+    #[test]
+    #[cfg(feature = "hw_failure_test")]
+    pub fn random_hardware_failure() {
+        allocators::init_simulated_hardware();
+        let sdcard = block_device::FsBlockDevice::new("test_file.db").unwrap();
+        assert!(failure_phase(sdcard).unwrap());
+        let sdcard = block_device::FsBlockDevice::from_existing("test_file.db").unwrap();
+        assert!(recovery_phase(sdcard).unwrap());
     }
 }

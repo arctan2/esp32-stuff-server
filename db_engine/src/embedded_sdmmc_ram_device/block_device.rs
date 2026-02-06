@@ -1,7 +1,6 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-use std::println;
 use std::fmt::Debug;
 use embedded_sdmmc::{BlockDevice, Block, BlockIdx, BlockCount};
 use std::sync::Mutex;
@@ -97,6 +96,32 @@ pub struct FsBlockDevice {
 }
 
 impl FsBlockDevice {
+    pub fn from_existing<P: AsRef<Path>>(path: P) -> Result<Self, FsBlockDeviceError> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(FsBlockDeviceError::IoError)?;
+
+        let metadata = file.metadata().map_err(FsBlockDeviceError::IoError)?;
+
+        let current_size = metadata.len();
+        if current_size == 0 {
+            file.set_len(DEFAULT_FILE_SIZE).map_err(FsBlockDeviceError::IoError)?;
+            let boot_image = include_bytes!("../../fat32.img");
+            file.write_all(boot_image).map_err(FsBlockDeviceError::IoError)?;
+            file.sync_all().map_err(FsBlockDeviceError::IoError)?;
+        }
+
+        let actual_size = file.metadata().map_err(FsBlockDeviceError::IoError)?.len();
+        let block_count = (actual_size / BLOCK_SIZE as u64) as u32;
+
+        Ok(FsBlockDevice {
+            file: Mutex::new(file),
+            block_count,
+        })
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, FsBlockDeviceError> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -104,12 +129,6 @@ impl FsBlockDevice {
             .create(true)
             .open(path)
             .map_err(FsBlockDeviceError::IoError)?;
-
-        let metadata = file.metadata().map_err(FsBlockDeviceError::IoError)?;
-        let current_size = metadata.len();
-        if current_size == 0 {
-            file.set_len(DEFAULT_FILE_SIZE).map_err(FsBlockDeviceError::IoError)?;
-        }
 
         let boot_image = include_bytes!("../../fat32.img");
         file.write_all(boot_image).map_err(FsBlockDeviceError::IoError)?;

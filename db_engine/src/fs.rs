@@ -2,8 +2,10 @@ pub trait PageFile {
     type Error: core::fmt::Debug;
 
     fn seek_from_start(&self, offset: u32) -> Result<(), Self::Error>;
+    fn seek_from_end(&self, offset: u32) -> Result<(), Self::Error>;
     fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error>;
     fn write(&self, buf: &[u8]) -> Result<(), Self::Error>;
+    fn offset(&self) -> u32;
     fn length(&self) -> u32;
     fn close(self) -> Result<(), Self::Error>;
     fn flush(&self) -> Result<(), Self::Error>;

@@ -9,6 +9,7 @@ pub unsafe fn write_bytes(buf: &mut [u8], offset: usize, bytes: &[u8]) {
     buf[offset..offset + bytes.len()].copy_from_slice(bytes);
 }
 
+#[allow(unused)]
 pub unsafe fn as_mut<T>(buf: &mut [u8], offset: usize) -> &mut T {
     unsafe {
         let size = core::mem::size_of::<T>();

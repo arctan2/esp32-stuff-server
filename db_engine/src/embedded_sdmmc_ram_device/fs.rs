@@ -79,12 +79,20 @@ where
         self.file.seek_from_start(offset)
     }
 
+    fn seek_from_end(&self, offset: u32) -> Result<(), Self::Error> {
+        self.file.seek_from_end(offset)
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.file.read(buf)
     }
 
     fn write(&self, buf: &[u8]) -> Result<(), Self::Error> {
         self.file.write(buf)
+    }
+
+    fn offset(&self) -> u32 {
+        self.file.offset()
     }
 
     fn length(&self) -> u32 {

@@ -47,7 +47,7 @@ macro_rules! as_ref {
 macro_rules! get_free_page {
     ($page_rw:expr, $buf:expr) => {
         PageFreeList::get_free_page::<F, A>(
-            $buf, 
+            $buf,
             $page_rw
         )
     };
