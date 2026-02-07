@@ -156,6 +156,11 @@ impl <'a, A, N> Query<'a, A, N> where A: Allocator + Clone, N: ToName {
         self
     }
 
+    pub fn limit(mut self, from: usize, to: usize) -> Self {
+        self.limit = Some(Limit(from, to));
+        self
+    }
+
     // pub fn grab_from_table(mut self, table: u32, name: Name) -> Self {
     //     self.project.push(ColumnName{ table: table, name: name });
     //     self
@@ -174,6 +179,7 @@ pub struct QueryExecutor<'a, F: PageFile, A: Allocator + Clone, N: ToName> {
     query: Query<'a, A, N>,
     is_ran: bool,
     payload: Vec<u8, A>,
+    cur_count: usize,
     row: Row<'a, A>,
     page_rw: &'a PageRW<F>
 }
@@ -198,6 +204,7 @@ impl <'a, F: PageFile, A: Allocator + Clone, N: ToName> QueryExecutor<'a, F, A, 
             row: Row::new_in(query.allocator.clone()),
             query: query,
             is_ran: false,
+            cur_count: 0,
             page_rw: page_rw,
         })
     }
@@ -267,6 +274,12 @@ impl <'a, F: PageFile, A: Allocator + Clone, N: ToName> QueryExecutor<'a, F, A, 
                 self.cursor.next(target_table, self.page_rw)?
             };
 
+            if let Some(limit) = &self.query.limit {
+                if self.cur_count > limit.1 {
+                    return Err(Error::EndOfRecords)
+                }
+            }
+
             payload.extend_from_slice(cell.payload(target_table.get_null_flags_width_bytes()));
             if cell.header.payload_overflow > 0 {
                  OverflowPage::read_all(self.page_rw, cell.header.payload_overflow, payload, self.tmp_buf)?;
@@ -293,6 +306,17 @@ impl <'a, F: PageFile, A: Allocator + Clone, N: ToName> QueryExecutor<'a, F, A, 
                         }
                     }
 
+                    self.cur_count += 1;
+
+                    if let Some(limit) = &self.query.limit {
+                        if self.cur_count < limit.0 {
+                            continue 'outter;
+                        }
+                        if self.cur_count > limit.1 {
+                            return Err(Error::EndOfRecords)
+                        }
+                    }
+
                     return Ok(row);
                 },
                 TopLevelOperator::Or(conditions) => {
@@ -309,6 +333,16 @@ impl <'a, F: PageFile, A: Allocator + Clone, N: ToName> QueryExecutor<'a, F, A, 
                         }
 
                         if result {
+                            self.cur_count += 1;
+
+                            if let Some(limit) = &self.query.limit {
+                                if self.cur_count < limit.0 {
+                                    continue 'outter;
+                                }
+                                if self.cur_count > limit.1 {
+                                    return Err(Error::EndOfRecords)
+                                }
+                            }
                             return Ok(row);
                         }
                     }

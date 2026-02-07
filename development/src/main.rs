@@ -46,7 +46,7 @@ async fn main() {
         use rand::{SeedableRng, seq::SliceRandom};
         use rand::rngs::StdRng;
 
-        let to = 100;
+        let to = 10;
         let mut rng = StdRng::seed_from_u64(42);
         let mut ids: Vec<usize> = (0..to).collect();
         ids.shuffle(&mut rng);
@@ -62,7 +62,7 @@ async fn main() {
 
         {
             let files = db.get_table("files", allocator.clone()).unwrap();
-            let query = Query::<_, &str>::new(files, allocator.clone());
+            let query = Query::<_, &str>::new(files, allocator.clone()).limit(8, 2);
             let mut exec = QueryExecutor::new(
                 query, &mut db.table_buf, &mut db.buf1, &mut db.buf2, &db.file_handler.page_rw.as_ref().unwrap()
             ).unwrap();
