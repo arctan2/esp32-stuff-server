@@ -11,7 +11,7 @@ use crate::table::{Table, Column, ColumnType, ToName};
 use crate::page_rw::{PageRW};
 use crate::fs::{DbDir, PageFile};
 use crate::page_buf::{PageBuffer};
-use crate::{as_ref_mut, as_ref, get_free_page};
+use crate::{as_ref_mut, as_ref, get_free_page, add_page_to_free_list};
 use allocator_api2::vec::Vec;
 use crate::serde_row;
 use crate::serde_row::{Value, Row};
@@ -198,6 +198,11 @@ where
             return Err(Error::ColCountDoesNotMatch);
         }
 
+        // the wal_begin_write is already called inside create_table
+        if table_page != FixedPages::DbCat.into() {
+            self.file_handler.wal_begin_write(&mut self.buf1)?; 
+        }
+
         if table.rows_btree_page == 0 {
             let free_page = unsafe {
                 get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)?
@@ -226,11 +231,15 @@ where
         )?;
 
 
-        self.file_handler.wal_begin_write(&mut self.buf2)?; {
+        /* begin write is made before any of get_free_page
+           and when create_table is called the wal_begin_write is called inside the create_table but it ends
+           in this function
+        */
+        {
             self.file_handler.wal_append_pages_vec(&path, &mut self.buf2)?;
             self.file_handler.wal_append_page(leaf_page, &mut self.buf2)?;
+            self.file_handler.wal_end_write()?;
         }
-        self.file_handler.wal_end_write()?;
 
         btree::insert_payload_to_leaf(
             &mut self.buf1, &mut self.buf2,
@@ -241,12 +250,22 @@ where
         )?;
         self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(table_page, self.table_buf.as_ref())?;
 
-        self.file_handler.end_wal()?;
+        if table_page != FixedPages::DbCat.into() {
+            self.file_handler.end_wal()?;
+        }
 
         Ok(())
     }
 
-    pub fn delete_from_table(&mut self, table_page: u32, key: Value<'_>, allocator: A) -> Result<(), Error<F::Error>> {
+    // this is the most hacky way to support delete_table with wal. I basically pass the entire
+    // btree pages of table during delete_table. I know I can do a wal checkpoint system. But I
+    // don't think I need that right now. No one will use this shitty db anyway.
+    pub fn delete_from_table(
+        &mut self,
+        table_page: u32,
+        key: Value<'_>,
+        allocator: A
+    ) -> Result<(), Error<F::Error>> {
         let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.read_page(table_page, self.table_buf.as_mut())?;
         let table = unsafe { as_ref_mut!(self.table_buf, Table) };
 
@@ -263,6 +282,16 @@ where
             &mut path
         )?;
 
+        if table_page != FixedPages::DbCat.into() {
+            self.file_handler.wal_begin_write(&mut self.buf3)?; 
+        }
+        
+        {
+            self.file_handler.wal_append_pages_vec(&path, &mut self.buf4)?;
+            self.file_handler.wal_append_page(leaf_page, &mut self.buf4)?;
+            self.file_handler.wal_end_write()?;
+        }
+
         btree::delete_payload_from_leaf(
             &mut self.buf1, &mut self.buf2,
             &mut self.buf3, &mut self.buf4,
@@ -271,7 +300,85 @@ where
             allocator.clone()
         )?;
         self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(table_page, self.table_buf.as_ref())?;
+
+        if table_page != FixedPages::DbCat.into() {
+            self.file_handler.end_wal()?;
+        }
+
         Ok(())
+    }
+
+    pub fn create_table(&mut self, allocator: A) -> Result<u32, Error<F::Error>> {
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+
+        self.file_handler.wal_begin_write(&mut self.buf1)?;
+
+        let free_page = unsafe { get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)? };
+        self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(free_page, self.table_buf.as_ref())?;
+
+        let mut row = Row::new_in(allocator.clone());
+        let name = table.name.clone();
+        row.push(Value::Chars(&name));
+        row.push(Value::Int(free_page as i64));
+        self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
+
+        self.file_handler.end_wal()?;
+
+        Ok(free_page)
+    }
+
+    pub fn delete_table(&mut self, table_page: u32, allocator: A) -> Result<(), Error<F::Error>> {
+        let _ = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.read_page(table_page, self.buf2.as_mut())?;
+        let table = unsafe { as_ref_mut!(self.buf2, Table) }; 
+
+        let pages = btree::get_all_table_pages(
+            table,
+            &mut self.buf1,
+            self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?,
+            allocator.clone()
+        )?;
+
+        let key = Value::Chars(&table.name);
+
+        self.file_handler.wal_begin_write(&mut self.buf4)?;
+        self.file_handler.wal_append_pages_vec(&pages, &mut self.buf4)?;
+        self.file_handler.wal_append_page(table_page, &mut self.buf4)?;
+        self.delete_from_table(FixedPages::DbCat.into(), key, allocator.clone())?;
+
+        let page_rw = self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?;
+
+        unsafe {
+            add_page_to_free_list!(
+                page_rw,
+                table_page,
+                &mut self.buf1
+            )?;
+        };
+
+        for p in pages.iter() {
+            unsafe {
+                add_page_to_free_list!(
+                    page_rw,
+                    *p,
+                    &mut self.buf1
+                )?;
+            }
+        }
+
+        self.file_handler.end_wal()?;
+
+        Ok(())
+    }
+
+    pub fn new_table_begin(&mut self, name: impl ToName) {
+        self.table_buf.as_mut().fill(0);
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+        table.name = name.to_name();
+    }
+
+    pub fn add_column(&mut self, col: Column) -> Result<(), Error<F::Error>> {
+        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
+        table.add_column(col)
     }
 
     pub fn get_col_idx(&mut self, table: u32, name: impl ToName) -> Option<u16> {
@@ -313,32 +420,6 @@ where
         while let Ok(row) = exec.next() {
             println!("table = {:?}", row);
         }
-    }
-
-    pub fn create_table(&mut self, allocator: A) -> Result<u32, Error<F::Error>> {
-        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
-
-        let free_page = unsafe { get_free_page!(self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?, &mut self.buf1)? };
-        self.file_handler.page_rw.as_ref().ok_or(Error::InitError)?.write_page(free_page, self.table_buf.as_ref())?;
-
-        let mut row = Row::new_in(allocator.clone());
-        let name = table.name.clone();
-        row.push(Value::Chars(&name));
-        row.push(Value::Int(free_page as i64));
-        self.insert_to_table(FixedPages::DbCat.into(), row, allocator)?;
-
-        Ok(free_page)
-    }
-
-    pub fn new_table_begin(&mut self, name: impl ToName) {
-        self.table_buf.as_mut().fill(0);
-        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
-        table.name = name.to_name();
-    }
-
-    pub fn add_column(&mut self, col: Column) -> Result<(), Error<F::Error>> {
-        let table = unsafe { as_ref_mut!(self.table_buf, Table) };
-        table.add_column(col)
     }
 }
 
@@ -417,6 +498,70 @@ mod test {
             ).unwrap();
 
             assert_eq!(exec.count().unwrap(), 5);
+        }
+    }
+
+    #[cfg(not(feature = "hw_failure_test"))]
+    #[test]
+    pub fn delete_table_test() {
+        allocators::init_simulated_hardware();
+        let sdcard = block_device::FsBlockDevice::new("test_file.db").unwrap();
+        let vol_man = VolumeManager::new(sdcard, timesource::DummyTimesource);
+        let volume = vol_man.open_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+        let root_dir = volume.open_root_dir().unwrap();
+        let _ = root_dir.make_dir_in_dir("STUFF").unwrap();
+        let stuff_dir = DbDirSdmmc::new(root_dir.open_dir("STUFF").unwrap());
+        let mut db = db::Database::new_init(&stuff_dir, esp_alloc::ExternalMemory).unwrap();
+
+        let allocator = esp_alloc::ExternalMemory;
+
+        {
+            let col1 = Column::new("col1", ColumnType::Chars).primary();
+            let col2 = Column::new("col2", ColumnType::Int);
+            db.new_table_begin("cool_table");
+            db.add_column(col1).unwrap();
+            db.add_column(col2).unwrap();
+            let _ = db.create_table(allocator.clone()).unwrap();
+        }
+        let cool_table = db.get_table("cool_table", allocator.clone()).unwrap();
+
+        for i in 0..100 {
+            let col1 = std::format!("cool_col1_value_{}", i);
+            let mut row = Row::new_in(allocator.clone());
+            row.push(Value::Chars(col1.as_bytes()));
+            row.push(Value::Int(i as i64));
+            db.insert_to_table(cool_table, row, allocator.clone()).unwrap();
+        }
+
+        for i in 0..5 {
+            let col1 = std::format!("cool_col1_value_{}", i);
+            db.delete_from_table(cool_table, Value::Chars(col1.as_bytes()), allocator.clone()).unwrap();
+        }
+
+        let cool_table = db.get_table("cool_table", allocator.clone()).unwrap();
+
+        {
+            let query = Query::<_, &str>::new(cool_table, allocator.clone());
+            let mut exec = QueryExecutor::new(
+                query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                &db.file_handler.page_rw.as_ref().unwrap()
+            ).unwrap();
+
+            assert_eq!(exec.count().unwrap(), 95);
+        }
+
+        db.delete_table(cool_table, allocator.clone()).unwrap();
+
+        let _ = db.file_handler.page_rw.as_ref().unwrap()
+                .read_page(crate::db::FixedPages::FreeList.into(), db.buf1.as_mut()).unwrap();
+        let free_page_list = unsafe { crate::as_ref!(db.buf1, crate::page_free_list::PageFreeList) };
+
+        assert_eq!({free_page_list.page_count}, 5);
+        assert_eq!(crate::db::DBHeader::get_page_count(&mut db.buf1, db.file_handler.page_rw.as_ref().unwrap()).unwrap(), 8);
+
+        match db.get_table("cool_table", allocator.clone()) {
+            Ok(_) => panic!("was cool_table not deleted"),
+            Err(_) => ()
         }
     }
 
@@ -516,10 +661,16 @@ mod test {
         })
     }
 
-    // this test needs WRITES_REM = 27 and PANICS_REM = 1
     #[test]
     #[cfg(feature = "hw_failure_test")]
     pub fn random_hardware_failure() {
+        {
+            let mut writes_rem = crate::page_rw::WRITES_REM.lock().unwrap();
+            let mut panics_rem = crate::page_rw::PANICS_REM.lock().unwrap();
+            *writes_rem = 27;
+            *panics_rem = 1;
+        }
+
         allocators::init_simulated_hardware();
         let sdcard = block_device::FsBlockDevice::new("test_file.db").unwrap();
         assert!(failure_phase(sdcard).unwrap());

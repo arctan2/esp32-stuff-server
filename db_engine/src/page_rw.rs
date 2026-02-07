@@ -7,10 +7,10 @@ extern crate std;
 use std::sync::{LazyLock, Mutex};
 
 #[cfg(feature = "std")]
-static WRITES_REM: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(27));
+pub static WRITES_REM: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(27));
 
 #[cfg(feature = "std")]
-static PANICS_REM: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(1));
+pub static PANICS_REM: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(1));
 
 pub const PAGE_SIZE: usize = 4096;
 

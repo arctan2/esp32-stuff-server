@@ -14,7 +14,7 @@ const PAGES_LIST_SIZE: usize = (PAGE_SIZE / size_of::<u32>()) - (size_of::<u32>(
 #[derive(Debug)]
 #[repr(packed)]
 pub struct PageFreeList {
-    page_count: u32,
+    pub page_count: u32,
     next_page: u32,
     pages: [u32; PAGES_LIST_SIZE] 
 }

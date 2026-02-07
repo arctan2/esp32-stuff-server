@@ -486,25 +486,25 @@ impl BtreeLeaf {
 }
 
 impl BtreeInternal {
-    pub fn init(&mut self) {
+    fn init(&mut self) {
         self.node_type = NodeType::Internal;
     }
 
-    pub fn get_offsets_mut(&mut self) -> &mut [u16] {
+    fn get_offsets_mut(&mut self) -> &mut [u16] {
         let ptr = self.data.as_ptr();
         return unsafe {
             core::slice::from_raw_parts_mut(ptr as *mut u16, self.key_count as usize)
         };
     }
 
-    pub fn get_offsets(&self) -> &[u16] {
+    fn get_offsets(&self) -> &[u16] {
         let ptr = self.data.as_ptr();
         return unsafe {
             core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
         };
     }
 
-    pub fn get_view(&self, idx: usize) -> Option<InternalCellView<'_>> {
+    fn get_view(&self, idx: usize) -> Option<InternalCellView<'_>> {
         let offsets = self.get_offsets();
         if idx < offsets.len() {
             Some(InternalCellView::new(&self.data, offsets[idx] as usize))
@@ -513,7 +513,7 @@ impl BtreeInternal {
         }
     }
 
-    pub fn find_view_idx_by_child(&self, child: u32) -> Option<usize> {
+    fn find_view_idx_by_child(&self, child: u32) -> Option<usize> {
         let offsets = self.get_offsets();
         for i in 0..offsets.len() {
             let view = InternalCellView::new(&self.data, offsets[i] as usize);
@@ -524,7 +524,7 @@ impl BtreeInternal {
         return None;
     }
 
-    pub fn get_left_sib_of_child(&self, child: u32) -> Option<u32> {
+    fn get_left_sib_of_child(&self, child: u32) -> Option<u32> {
         let ptr = self.data.as_ptr();
         let offsets: &[u16] = unsafe {
             core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
@@ -546,7 +546,7 @@ impl BtreeInternal {
         return None
     }
 
-    pub fn next_child_by_key(&self, key: &Key) -> u32 {
+    fn next_child_by_key(&self, key: &Key) -> u32 {
         let offsets = self.get_offsets();
         let mut l = 0;
         let mut h = offsets.len();
@@ -571,7 +571,7 @@ impl BtreeInternal {
     }
 
     #[cfg(feature = "std")]
-    pub fn print<'a>(&'a self) {
+    fn print<'a>(&'a self) {
         let ptr = self.data.as_ptr();
         let offsets: &[u16] = unsafe {
             core::slice::from_raw_parts(ptr as *const u16, self.key_count as usize)
@@ -587,7 +587,7 @@ impl BtreeInternal {
         println!("}}");
     }
 
-    pub fn read_btree_cells<'a, A: Allocator>(&'a self, allocator: A) -> BtreeCells<'a, A> {
+    fn read_btree_cells<'a, A: Allocator>(&'a self, allocator: A) -> BtreeCells<'a, A> {
         let mut cells: BtreeCells<A> = BtreeCells::new_in(allocator);
         let ptr = self.data.as_ptr();
         let offsets: &[u16] = unsafe {
@@ -603,7 +603,7 @@ impl BtreeInternal {
         return cells;
     }
 
-    pub fn write_btree_cells<A: Allocator>(&mut self, cells: &BtreeCells<A>, start_idx: usize, end_idx: usize) {
+    fn write_btree_cells<A: Allocator>(&mut self, cells: &BtreeCells<A>, start_idx: usize, end_idx: usize) {
         self.key_count = (end_idx - start_idx) as u16;
         let mut end = self.data.len();
         let mut offset_idx = 0;
@@ -935,6 +935,47 @@ pub fn delete_payload_from_leaf<'a, F: PageFile, A: Allocator + Clone>(
     page_rw.write_page(leaf_page, tmp_buf1.as_ref())?;
 
     Ok(())
+}
+
+pub fn get_all_table_pages<'a, F: PageFile, A: Allocator + Clone>(
+    table: &Table,
+    tmp_buf: &mut PageBuffer<A>,
+    page_rw: &PageRW<F>,
+    allocator: A
+) -> Result<Vec<u32, A>, Error<F::Error>> {
+    let mut pages: Vec<u32, A> = Vec::new_in(allocator.clone());
+
+    let mut cur_page = table.rows_btree_page;
+    if cur_page == 0 {
+        return Ok(pages);
+    }
+
+    let mut stack: Vec<u32, A> = Vec::new_in(allocator);
+    stack.push(cur_page);
+
+    while stack.len() > 0 {
+        let cur_page = stack.pop().unwrap();
+
+        pages.push(cur_page);
+
+        let _ = page_rw.read_page(cur_page, tmp_buf.as_mut());
+        let btree_page = unsafe { as_ref!(tmp_buf, BtreePage) };
+        if btree_page.node_type == NodeType::Leaf {
+            continue;
+        }
+
+        let btree_internal = unsafe { as_ref!(tmp_buf, BtreeInternal) };
+        let offsets = btree_internal.get_offsets();
+
+        stack.push(btree_internal.left_child);
+
+        for i in offsets.iter() {
+            let child = InternalCellView::new(&btree_internal.data, *i as usize).header.child;
+            stack.push(child);
+        }
+    }
+
+    Ok(pages)
 }
 
 pub fn traverse_to_leaf_with_path<'a, F: PageFile, A: Allocator + Clone>(

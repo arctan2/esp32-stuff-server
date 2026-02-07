@@ -46,25 +46,18 @@ async fn main() {
         use rand::{SeedableRng, seq::SliceRandom};
         use rand::rngs::StdRng;
 
-        let to = 10;
+        let to = 100;
         let mut rng = StdRng::seed_from_u64(42);
         let mut ids: Vec<usize> = (0..to).collect();
         ids.shuffle(&mut rng);
 
         for i in ids.iter() {
             let path = format!("/some/file_{}.txt", i);
-            println!("inserting {}", path);
             let mut row = Row::new_in(allocator.clone());
             row.push(Value::Chars(path.as_bytes()));
             row.push(Value::Int(*i as i64));
             row.push(Value::Chars(b"file.txt"));
             db.insert_to_table(files, row, allocator.clone()).unwrap();
-        }
-
-        for i in 0..5{
-            let path = format!("/some/file_{}.txt", i);
-            println!("deleteing {}", path);
-            db.delete_from_table(files, Value::Chars(path.as_bytes()), allocator.clone()).unwrap();
         }
 
         {
@@ -78,6 +71,11 @@ async fn main() {
                 println!("row = {:?}", row);
             }
         }
+
+        let fav = db.get_table("fav", allocator.clone()).unwrap();
+
+        db.delete_table(files, allocator.clone()).unwrap();
+        db.delete_table(fav, allocator.clone()).unwrap();
 
         db.close(&stuff_dir).unwrap();
         println!("db closed successfully");
