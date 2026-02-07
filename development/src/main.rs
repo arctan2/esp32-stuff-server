@@ -1,7 +1,7 @@
 #![allow(nonstandard_style)]
-use db_engine::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource};
-use db_engine::embedded_sdmmc_ram_device::fs::{DbDirSdmmc};
-use db_engine::{Column, ColumnType, Value, Row, ToName, Query, QueryExecutor};
+use alpa::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource};
+use alpa::embedded_sdmmc_ram_device::fs::{DbDirSdmmc};
+use alpa::{Column, ColumnType, Value, Row, Query, QueryExecutor};
 use embedded_sdmmc::{VolumeManager};
 
 #[tokio::main(flavor = "current_thread")]
@@ -13,7 +13,7 @@ async fn main() {
     let root_dir = volume.open_root_dir().unwrap();
     let _ = root_dir.make_dir_in_dir("STUFF").unwrap();
     let stuff_dir = DbDirSdmmc::new(root_dir.open_dir("STUFF").unwrap());
-    let mut db = db_engine::db::Database::new_init(&stuff_dir, esp_alloc::ExternalMemory).unwrap();
+    let mut db = alpa::db::Database::new_init(&stuff_dir, esp_alloc::ExternalMemory).unwrap();
 
     let allocator = esp_alloc::ExternalMemory;
 
@@ -62,7 +62,7 @@ async fn main() {
 
         {
             let files = db.get_table("files", allocator.clone()).unwrap();
-            let query = Query::<_, &str>::new(files, allocator.clone()).limit(8, 2);
+            let query = Query::<_, &str>::new(files, allocator.clone()).limit(2, 9);
             let mut exec = QueryExecutor::new(
                 query, &mut db.table_buf, &mut db.buf1, &mut db.buf2, &db.file_handler.page_rw.as_ref().unwrap()
             ).unwrap();
