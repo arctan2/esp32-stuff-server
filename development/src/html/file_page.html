@@ -1,3 +1,7 @@
+<br>
+<br>
+<a id="download" href="" download="">Download File</a>
+
 <style>
 *{
 	margin: 0;
@@ -16,4 +20,8 @@ body{
 }
 </style>
 <script>
+const pathParts = window.location.href.split("/");
+const fname = pathParts[pathParts.length - 1];
+download.href = window.location.href.replace("/fs/", "/download/");
+download.setAttribute("download", fname);
 </script>

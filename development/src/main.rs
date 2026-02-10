@@ -186,11 +186,66 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FileIterChunks<D, A> {
                                     chunk_writer.write_chunk(b"</pre>").await?;
                                 }
                             } else {
-                                chunk_writer.write_chunk(b"only files with TXT or HTM extension is supported to view").await?;
+                                chunk_writer.write_chunk(b"only files with TXT or HTM extension is supported to view.").await?;
                             }
 
                             if ext != b"HTM" {
                                 chunk_writer.write_chunk(include_str!("./html/file_page.html").as_bytes()).await?;
+                            }
+                        }
+                    }
+                }
+                self.fman.close_file(file).await;
+            },
+            Err(e) => {
+                chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+            }
+        }
+        chunk_writer.finalize().await
+    }
+}
+
+struct DownloadIterChunks<D: BlockDevice, A: Allocator + Clone> {
+    file: Result<FileType, Error<D::Error>>,
+    fman: &'static FMan<'static>,
+    allocator: A
+}
+
+impl <D: BlockDevice, A: Allocator + Clone> Chunks for DownloadIterChunks<D, A> {
+    fn content_type(&self) -> &'static str {
+        ""
+    }
+
+    async fn write_chunks<W: picoserve::io::Write>(
+        self,
+        mut chunk_writer: ChunkWriter<W>,
+    ) -> Result<ChunksWritten, W::Error> {
+        match self.file {
+            Ok(file) => {
+                match file {
+                    FileType::Dir(dir) => {
+                    },
+                    FileType::File(ref entry, f) => {
+                        let state = self.fman.state.lock().await;
+                        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+                            loop {
+                                let mut buffer = [0u8; 4096];
+                                match vm.read(f, &mut buffer) {
+                                    Ok(count) => {
+                                        chunk_writer.write_chunk(&buffer[0..count]).await?;
+                                        match vm.file_eof(f) {
+                                            Ok(is_eof) => if is_eof { break },
+                                            Err(e) => {
+                                                chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+                                                break;
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -215,10 +270,21 @@ async fn handle_fs(path: String) -> impl IntoResponse {
     })
 }
 
+async fn handle_download(path: String) -> impl IntoResponse {
+    let fman = get_file_manager();
+    fman.open_path_sig.reset();
+    fman.event_chan.send(Event::OpenPath(path, &fman.open_path_sig)).await;
+    let file = fman.open_path_sig.wait().await;
+    ChunkedResponse::new(DownloadIterChunks::<FsBlockDevice, allocators::SimAllocator<23>> { 
+        file, fman, allocator: esp_alloc::ExternalMemory
+    })
+}
+
 fn router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
     picoserve::Router::new()
         .route("/", get(|| async {
             Response::ok(HOME_PAGE).with_header("Content-Type", "text/html")
         }))
         .route(("/fs", CatchAll), get(handle_fs))
+        .route(("/download", CatchAll), get(handle_download))
 }
