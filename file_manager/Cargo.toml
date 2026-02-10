@@ -1,0 +1,15 @@
+[package]
+name = "file_manager"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+embassy = ["dep:embassy-sync"]
+
+[dependencies]
+tokio = { version = "1.49.0", features = ["full"], optional = true }
+embassy-sync = { version = "0.7.2", optional = true }
+embedded-sdmmc = "0.9.0"
+

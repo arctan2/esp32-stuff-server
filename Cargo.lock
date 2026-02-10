@@ -297,6 +297,7 @@ dependencies = [
  "embassy-time 0.5.0",
  "embedded-sdmmc",
  "enumset",
+ "file_manager",
  "heapless 0.8.0",
  "picoserve",
  "postcard",
@@ -1012,6 +1013,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "file_manager"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync 0.7.2",
+ "embedded-sdmmc",
+ "tokio",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1372,6 +1382,7 @@ dependencies = [
  "serde",
  "serde-json-core",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
