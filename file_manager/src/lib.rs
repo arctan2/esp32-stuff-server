@@ -17,7 +17,7 @@ use embedded_sdmmc::{
 
 #[derive(Debug)]
 pub enum FileType {
-    File(RawFile),
+    File(DirEntry, RawFile),
     Dir(RawDirectory)
 }
 
@@ -45,7 +45,7 @@ pub struct FileManagerState<
     const MF: usize,
     const MV: usize
 > {
-    card_state: CardState<D, T, MD, MF, MV>
+    pub card_state: CardState<D, T, MD, MF, MV>
 }
 
 impl <
@@ -90,7 +90,7 @@ pub struct FileManager<
 > {
     pub event_chan: Channel<Event<'a, D>, 2>,
     pub open_path_sig: Signal<Result<FileType, Error<D::Error>>>,
-    state: Mutex<FileManagerState<D, T, MD, MF, MV>>
+    pub state: Mutex<FileManagerState<D, T, MD, MF, MV>>
 }
 
 impl <
@@ -112,13 +112,13 @@ impl <
     pub async fn close_file(&self, file_type: FileType) {
         let state = self.state.lock().await;
 
-        if let CardState::Active{ vm: ref vm, vol: ref vol } = state.card_state {
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
             match file_type {
-                FileType::File(f) => {
-                    let _ = vm.close_file(f).unwrap();
+                FileType::File(_, f) => {
+                    let _ = vm.close_file(f);
                 },
                 FileType::Dir(dir) => {
-                    println!("file closed = {:?}", vm.close_dir(dir));
+                    let _ = vm.close_dir(dir);
                 }
             }
         }
@@ -127,7 +127,7 @@ impl <
     async fn resolve_path_iter(&self, path: String) -> Result<FileType, Error<D::Error>> {
         let state = self.state.lock().await;
 
-        if let CardState::Active{ vm: ref vm, vol: ref vol } = state.card_state {
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
             let mut cur_dir = vm.open_root_dir(*vol)?;
 
             let path = path.trim_matches('/');
@@ -184,7 +184,7 @@ impl <
                             }
                         } else {
                             match vm.open_file_in_dir(cur_dir, last_name, Mode::ReadOnly) {
-                                Ok(f) => Ok(FileType::File(f)),
+                                Ok(f) => Ok(FileType::File(entry, f)),
                                 Err(e) => Err(e)
                             }
                         }

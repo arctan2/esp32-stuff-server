@@ -1,0 +1,40 @@
+<style>
+*{
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+html {
+	background-color: black;
+	color: white;
+	font-family: monospace;
+}
+
+body{
+	padding: 1rem;
+}
+
+a{
+	font-size: 1rem;
+	display: block;
+	text-decoration: none;
+}
+
+</style>
+
+<script>
+const aTags = document.querySelectorAll("a");
+
+for(const a of aTags) {
+	const isDir = a.innerText[a.innerText.length - 1] === "/";
+	let loc = window.location.href;
+	if(!loc.endsWith("/")) loc += "/";
+	a.href = loc + a.innerText;
+	if(isDir) {
+		a.style.color = "#00f";
+	} else {
+		a.style.color = "#fff";
+	}
+}
+</script>
