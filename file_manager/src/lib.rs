@@ -15,15 +15,10 @@ use embedded_sdmmc::{
     Mode
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FileType {
     File(DirEntry, RawFile),
     Dir(RawDirectory)
-}
-
-#[derive(Debug)]
-pub enum Event<'a, D: BlockDevice> {
-    OpenPath(String, &'a Signal<Result<FileType, Error<D::Error>>>),
 }
 
 #[derive(Debug)]
@@ -83,28 +78,24 @@ impl <
 
 #[derive(Debug)]
 pub struct FileManager<
-    'a, D: BlockDevice, T: TimeSource,
+    D: BlockDevice, T: TimeSource,
     const MD: usize,
     const MF: usize,
     const MV: usize
 > {
-    pub event_chan: Channel<Event<'a, D>, 2>,
-    pub open_path_sig: Signal<Result<FileType, Error<D::Error>>>,
-    pub state: Mutex<FileManagerState<D, T, MD, MF, MV>>
+    pub state: Mutex<FileManagerState<D, T, MD, MF, MV>>,
 }
 
 impl <
-    'a, D: BlockDevice, T: TimeSource,
+    D: BlockDevice, T: TimeSource,
     const MD: usize,
     const MF: usize,
     const MV: usize
-> FileManager<'a, D, T, MD, MF, MV> {
+> FileManager<D, T, MD, MF, MV> {
     pub fn new(block_device: D, time_src: T) -> Self {
         let mut state = FileManagerState::new(block_device, time_src);
         state.try_mount();
         Self {
-            event_chan: Channel::new(),
-            open_path_sig: Signal::new(),
             state: Mutex::new(state)
         }
     }
@@ -124,7 +115,58 @@ impl <
         }
     }
 
-    async fn resolve_path_iter(&self, path: String) -> Result<FileType, Error<D::Error>> {
+    pub async fn open_file<'a>(&self, dir: FileType, name: &'a str, mode: Mode) -> Result<FileType, Error<D::Error>> {
+        let state = self.state.lock().await;
+
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
+            match dir {
+                FileType::Dir(d) => {
+                    match vm.find_directory_entry(d, name) {
+                        Ok(entry) => {
+                            if entry.attributes.is_directory() {
+                                return Err(Error::BadHandle);
+                            } else {
+                                let file = vm.open_file_in_dir(d, name, mode)?;
+                                return Ok(FileType::File(entry, file));
+                            }
+                        },
+                        Err(Error::NotFound) => {
+                            let file = vm.open_file_in_dir(d, name, mode)?;
+                            vm.flush_file(file)?;
+                            let entry = vm.find_directory_entry(d, name)?;
+                            return Ok(FileType::File(entry, file));
+                        },
+                        Err(e) => return Err(e)
+                    }
+                },
+                _ => return Err(Error::BadHandle)
+            }
+        }
+        return Err(Error::NotFound);
+    }
+
+    pub async fn mkdir<'a>(&self, dir: FileType, name: &'a str) -> Result<(), Error<D::Error>> {
+        let state = self.state.lock().await;
+
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
+            match dir {
+                FileType::Dir(d) => return vm.make_dir_in_dir(d, name),
+                _ => return Err(Error::BadHandle)
+            }
+        }
+        return Err(Error::NotFound);
+    }
+
+    pub async fn root_dir(&self) -> Result<FileType, Error<D::Error>> {
+        let state = self.state.lock().await;
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
+            Ok(FileType::Dir(vm.open_root_dir(*vol)?))
+        } else {
+            Err(Error::NotFound)
+        }
+    }
+    
+    pub async fn resolve_path_iter<'a>(&self, path: &'a str) -> Result<FileType, Error<D::Error>> {
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
@@ -198,14 +240,6 @@ impl <
         }
 
         Err(Error::NotFound)
-    }
-
-    pub async fn run(&self) {
-        loop {
-            match self.event_chan.recv().await {
-                Event::OpenPath(path, sig) => sig.signal(self.resolve_path_iter(path).await).await
-            }
-        }
     }
 }
 
