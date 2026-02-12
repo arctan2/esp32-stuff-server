@@ -1,0 +1,87 @@
+<style>
+*{
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+html {
+	background-color: black;
+	color: white;
+	font-family: monospace;
+}
+
+body{
+	padding: 1rem;
+}
+
+a{
+	font-size: 1rem;
+	display: inline-block;
+	text-decoration: none;
+}
+
+.size{
+	display: inline-block;
+	margin-right: 0.5rem;
+	color: yellow;
+}
+
+</style>
+
+<input type="file" id="upload" />
+<div>
+	<button onclick="uploadFile(this)">upload file</button>
+</div>
+
+<script>
+const aTags = document.querySelectorAll("a");
+
+for(const a of aTags) {
+	let [actual_name, name] = a.innerText.split(";");
+	let origin = window.location.origin;
+	a.href = `${origin}/fs/files/${actual_name}`;
+	a.innerText = name;
+	a.style.color = "#fff";
+}
+
+async function uploadFile(btn) {
+	try {
+		btn.disabled = true;
+		btn.innerText = "uploading...";
+
+		const fileInput = document.getElementById('upload');
+		const file = fileInput.files[0];
+
+		if(!file) return;
+
+		const fileName = file.name; 
+		const parts = fileName.split('.');
+		let extension = "bin";
+
+		if(parts.length > 1) {
+			extension = parts.pop();
+		}
+
+		const formData = new FormData();
+		formData.append('file', file);
+
+		const response = await fetch(`/upload?ext=${extension}`, {
+			method: 'POST',
+			body: formData,
+		});
+
+		const data = await response.text();
+
+		if(data === "success") {
+			alert("Upload successful!");
+		} else {
+			alert(`error: ${data}`);
+		}
+		window.location.reload();
+	} catch(e) {
+		alert(`error: ${e}`);
+	}
+}
+
+</script>

@@ -1,10 +1,11 @@
 #![allow(nonstandard_style)]
-use alpa::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource};
-use alpa::embedded_sdmmc_ram_device::fs::{DbDirSdmmc};
+use alpa::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource, fs};
+use crate::fs::{DbDirSdmmc};
+use alpa::db::Database;
 use alpa::{Column, ColumnType, Value, Row, Query, QueryExecutor};
 use crate::block_device::{FsBlockDevice};
 use crate::timesource::{DummyTimesource};
-use embedded_sdmmc::{BlockDevice, TimeSource, Error};
+use embedded_sdmmc::{BlockDevice, TimeSource, Error, RawDirectory, Mode};
 use picoserve::time::Duration;
 use picoserve::routing::{post, get, parse_path_segment, PathDescription};
 use picoserve::response::{IntoResponse, Response, DebugValue};
@@ -61,7 +62,7 @@ async fn main() {
     tokio::task::LocalSet::new()
         .run_until(async {
             loop {
-                match init_file_system::<block_device::FsBlockDevice>().await {
+                match init_file_system::<FsBlockDevice, allocators::SimAllocator<23>>(esp_alloc::ExternalMemory).await {
                     Ok(()) => break,
                     Err(_) => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
@@ -88,28 +89,92 @@ async fn main() {
     .await
 }
 
-async fn init_file_system<D: BlockDevice>() -> Result<(), Error<D::Error>>
-    where
-        Error<<D as BlockDevice>::Error>: From<Error<block_device::FsBlockDeviceError>>
+use crate::block_device::FsBlockDeviceError;
+
+#[allow(dead_code)]
+enum InitError {
+    SdCard(embedded_sdmmc::Error<FsBlockDeviceError>),
+    Database(alpa::db::Error<embedded_sdmmc::Error<FsBlockDeviceError>>),
+}
+
+impl From<alpa::db::Error<embedded_sdmmc::Error<FsBlockDeviceError>>> for InitError {
+    fn from(e: alpa::db::Error<embedded_sdmmc::Error<FsBlockDeviceError>>) -> Self {
+        InitError::Database(e)
+    }
+}
+
+impl From<embedded_sdmmc::Error<FsBlockDeviceError>> for InitError {
+    fn from(e: embedded_sdmmc::Error<FsBlockDeviceError>) -> Self {
+        InitError::SdCard(e)
+    }
+}
+
+async fn init_file_system<D: BlockDevice, A: Allocator + Clone>(allocator: A) -> Result<(), InitError>
+where 
+    embedded_sdmmc::Error<D::Error>: Into<embedded_sdmmc::Error<FsBlockDeviceError>>
 {
     let fman = get_file_manager();
     let root_dir = fman.root_dir().await?;
     fman.mkdir(root_dir.clone(), "DB").await?;
     fman.mkdir(root_dir.clone(), "FILES").await?;
     fman.mkdir(root_dir.clone(), "MUSIC").await?;
-    fman.mkdir(root_dir.clone(), "F_IDS").await?;
 
-    let db_dir = fman.resolve_path_iter("DB").await?;
-    match db_dir {
-        FileType::Dir(_) => {
-            fman.mkdir(db_dir.clone(), "FILES").await?;
-            fman.mkdir(db_dir.clone(), "MUSIC").await?;
-        },
-        _ => panic!("your device is cooked")
-    };
+    {
+        let db_dir = fman.open_dir(Some(root_dir), "DB").await?;
+        let state = fman.state.lock().await;
 
-    fman.close_file(db_dir);
-    fman.close_file(root_dir);
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            let stuff_dir = DbDirSdmmc::new(db_dir.to_directory(vm));
+            let mut db = Database::new_init(&stuff_dir, allocator.clone())?;
+
+            {
+                let name = Column::new("name", ColumnType::Chars).primary();
+                let count = Column::new("count", ColumnType::Int);
+                db.new_table_begin("count_tracker");
+                db.add_column(name)?;
+                db.add_column(count)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            {
+                let name = Column::new("path", ColumnType::Chars).primary();
+                let count = Column::new("name", ColumnType::Chars);
+                let size = Column::new("size", ColumnType::Int);
+                db.new_table_begin("files");
+                db.add_column(name)?;
+                db.add_column(count)?;
+                db.add_column(size)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            {
+                let name = Column::new("path", ColumnType::Chars).primary();
+                let count = Column::new("name", ColumnType::Chars);
+                db.new_table_begin("music");
+                db.add_column(name)?;
+                db.add_column(count)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            let count_tracker = db.get_table("count_tracker", allocator.clone())?;
+
+            {
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(b"files"));
+                row.push(Value::Int(1));
+                db.insert_to_table(count_tracker, row, allocator.clone())?;
+            }
+
+            {
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(b"music"));
+                row.push(Value::Int(1));
+                db.insert_to_table(count_tracker, row, allocator.clone())?;
+            }
+        }
+    }
+
+    let _ = fman.close_dir(root_dir).await;
     Ok(())
 }
 
@@ -136,13 +201,13 @@ impl<T: Copy + core::fmt::Debug> PathDescription<T> for CatchAll {
     }
 }
 
-struct FileIterChunks<D: BlockDevice, A: Allocator + Clone> {
+struct FsIterChunks<D: BlockDevice, A: Allocator + Clone> {
     file: Result<FileType, Error<D::Error>>,
     fman: &'static FMan,
     allocator: A
 }
 
-impl <D: BlockDevice, A: Allocator + Clone> Chunks for FileIterChunks<D, A> {
+impl <D: BlockDevice, A: Allocator + Clone> Chunks for FsIterChunks<D, A> {
     fn content_type(&self) -> &'static str {
         "text/html"
     }
@@ -230,12 +295,84 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FileIterChunks<D, A> {
                         }
                     }
                 }
-                self.fman.close_file(file).await;
+                self.fman.close_file_type(file).await;
             },
             Err(e) => {
                 chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
             }
         }
+        chunk_writer.finalize().await
+    }
+}
+
+struct FilesIterChunks<D: BlockDevice, A: Allocator + Clone> {
+    db_dir: Result<RawDirectory, Error<D::Error>>,
+    fman: &'static FMan,
+    allocator: A
+}
+
+impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
+    fn content_type(&self) -> &'static str {
+        "text/html"
+    }
+
+    async fn write_chunks<W: picoserve::io::Write>(
+        self,
+        mut chunk_writer: ChunkWriter<W>,
+    ) -> Result<ChunksWritten, W::Error> {
+        match self.db_dir {
+            Ok(dir) => {
+                let state = self.fman.state.lock().await;
+                if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+                    let db_dir = DbDirSdmmc::new(dir.to_directory(vm));
+                    let mut db = match Database::new_init(&db_dir, self.allocator.clone()) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+                            return chunk_writer.finalize().await;
+                        }
+                    };
+                
+
+                    let mut files_table = match db.get_table("files", self.allocator.clone()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            chunk_writer.write_chunk(format!("table not found: {:?}", e).as_bytes()).await?;
+                            return chunk_writer.finalize().await;
+                        }
+                    };
+
+                    {
+                        let query = Query::<_, &str>::new(files_table, self.allocator.clone());
+                        match QueryExecutor::new(
+                            query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                            &db.file_handler.page_rw.as_ref().unwrap()
+                        ) {
+                            Ok(mut exec) => {
+                                while let Ok(row) = exec.next() {
+                                    chunk_writer.write_chunk(b"<div><span class=\"size\">").await?;
+                                    chunk_writer.write_chunk(format!("{} B", row[2].to_int().unwrap()).as_bytes()).await?;
+                                    chunk_writer.write_chunk(b"</span><a>").await?;
+                                    chunk_writer.write_chunk(row[0].to_chars().unwrap()).await?;
+                                    chunk_writer.write_chunk(b";").await?;
+                                    chunk_writer.write_chunk(row[1].to_chars().unwrap()).await?;
+                                    chunk_writer.write_chunk(b"</a></div><br>").await?;
+                                }
+                            },
+                            Err(e) => {
+                                chunk_writer.write_chunk(b"<i>table empty</i><br>").await?;
+                            }
+                        };
+                    }
+
+                    chunk_writer.write_chunk(include_str!("./html/files.html").as_bytes()).await?;
+                }
+            },
+            Err(e) => {
+                chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+            }
+        }
+
         chunk_writer.finalize().await
     }
 }
@@ -285,7 +422,7 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for DownloadIterChunks<D, A> 
                         }
                     }
                 }
-                self.fman.close_file(file).await;
+                self.fman.close_file_type(file).await;
             },
             Err(e) => {
                 chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
@@ -296,10 +433,7 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for DownloadIterChunks<D, A> 
 }
 
 
-pub struct FileUploader {
-    pub filename: [u8; 128],
-    pub filename_len: usize,
-}
+pub struct FileUploader;
 
 enum Step {
     FindFilename,
@@ -344,129 +478,224 @@ impl<'r, State> FromRequest<'r, State> for FileUploader {
         parts: RequestParts<'r>,
         body: RequestBody<'r, R>,
     ) -> Result<Self, Self::Rejection> {
-        let mut reader = body.reader();
-        let mut buffer = [0u8; 512];
-        let mut filename = [0u8; 128];
-        let mut filename_len = 0;
+        let fman = get_file_manager();
+        let db_dir = fman.open_dir(None, "DB").await.map_err(|_| "unable to open db")?;
 
-        let mut step = Step::FindFilename;
-        let mut pattern_idx = 0;
+        let state = fman.state.lock().await;
 
-        let boundary_key = "boundary=";
-        let content_type = parts.headers().get("Content-Type").ok_or("Content-Type not found")?;
-        let boundary_start = content_type.as_str().unwrap().find(boundary_key).ok_or("boundary not found")?;
-        let boundary = &content_type.as_raw()[boundary_start + boundary_key.len()..];
-        let mut lookback_buf = [0u8; 128];
-        let mut lookback_len = 0;
+        if let CardState::Active{ ref vm, ref vol } = state.card_state {
+            let db_dir = DbDirSdmmc::new(db_dir.to_directory(vm));
+            let mut db = match Database::new_init(&db_dir, esp_alloc::ExternalMemory) {
+                Ok(d) => d,
+                Err(e) => return Err("db init error")
+            };
+            let count_tracker_table = db.get_table("count_tracker", esp_alloc::ExternalMemory)
+                                        .map_err(|_| "unable to get count_tracker table")?;
+            let files_table = db.get_table("files", esp_alloc::ExternalMemory)
+                                .map_err(|_| "unable to get files table")?;
+            let mut cur_file_id: i64 = -1;
 
-        println!("path = {:?}", parts.path());
+            {
+                let query = Query::<_, &str>::new(count_tracker_table, esp_alloc::ExternalMemory).key(Value::Chars(b"files"));
+                match QueryExecutor::new(
+                    query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                    &db.file_handler.page_rw.as_ref().unwrap()
+                ) {
+                    Ok(mut exec) => {
+                        if let Ok(row) = exec.next() {
+                            cur_file_id = row[1].to_int().unwrap();
+                        } else {
+                            return Err("bad init");
+                        }
+                    },
+                    Err(e) => {
+                        return Err("table empty");
+                    }
+                };
+            }
 
-        'stream: while let Ok(n) = reader.read(&mut buffer).await {
-            if n == 0 { break; }
+            if cur_file_id < 0 || cur_file_id >= 99999999 {
+                return Err("id limit reached");
+            }
 
-            for (i, &byte) in buffer[..n].iter().enumerate() {
-                match step {
-                    Step::FindFilename => {
-                        let file_pat = b"filename=\"";
-                        if byte == file_pat[pattern_idx] {
-                            pattern_idx += 1;
-                            if pattern_idx == file_pat.len() {
-                                step = Step::ReadFilename;
+            let query_params = parts.query().ok_or("missing extension query")?;
+            if query_params.is_empty() {
+                return Err("missing extension query");
+            }
+
+            let mut s = query_params.0.split('=');
+            let _ = s.next().unwrap();
+            let ext = s.next().unwrap();
+
+            let actual_name = format!("{}.{}", cur_file_id, ext);
+            let root_dir = vm.open_root_dir(*vol).map_err(|_| "unable to open root_dir")?;
+            let files_dir = vm.open_dir(root_dir, "FILES").map_err(|_| "unable to open FILES dir")?;
+            let new_file = vm.open_file_in_dir(files_dir, str::from_utf8(actual_name.as_bytes()).unwrap(), Mode::ReadWriteCreate)
+                             .map_err(|_| "unable to create file")?;
+
+            vm.close_dir(root_dir).map_err(|_| "unable to close root_dir")?;
+            vm.close_dir(files_dir).map_err(|_| "unable to close files_dir")?;
+
+            let mut reader = body.reader();
+            let mut buffer = [0u8; 512];
+            let mut filename = [0u8; 128];
+            let mut filename_len = 0;
+
+            let mut step = Step::FindFilename;
+            let mut pattern_idx = 0;
+
+            let boundary_key = "boundary=";
+            let content_type = parts.headers().get("Content-Type").ok_or("Content-Type not found")?;
+            let boundary_start = content_type.as_str().unwrap().find(boundary_key).ok_or("boundary not found")?;
+            let boundary = &content_type.as_raw()[boundary_start + boundary_key.len()..];
+            let mut lookback_buf = [0u8; 128];
+            let mut lookback_len = 0;
+            let mut file_size: i64 = 0;
+
+            'stream: while let Ok(n) = reader.read(&mut buffer).await {
+                if n == 0 { break; }
+
+                for (i, &byte) in buffer[..n].iter().enumerate() {
+                    match step {
+                        Step::FindFilename => {
+                            let file_pat = b"filename=\"";
+                            if byte == file_pat[pattern_idx] {
+                                pattern_idx += 1;
+                                if pattern_idx == file_pat.len() {
+                                    step = Step::ReadFilename;
+                                    pattern_idx = 0;
+                                }
+                            } else {
                                 pattern_idx = 0;
                             }
-                        } else {
-                            pattern_idx = 0;
                         }
-                    }
 
-                    Step::ReadFilename => {
-                        println!("reading byte = '{}'", byte as char);
-                        if byte == '"' as u8 {
-                            step = Step::FindDataStart;
-                            pattern_idx = 0;
-                        } else {
-                            filename[filename_len] = byte;
-                            filename_len += 1;
-                        }
-                    }
-
-                    Step::FindDataStart => {
-                        let header_sep = b"\r\n\r\n";
-                        if byte == header_sep[pattern_idx] {
-                            pattern_idx += 1;
-                            if pattern_idx == header_sep.len() {
-                                step = Step::StreamingBody;
-                                println!("found body start");
-                            }
-                        } else {
-                            pattern_idx = 0;
-                        }
-                    }
-
-                    Step::StreamingBody => {
-                        let data_chunk = &buffer[i..n];
-
-                        if let Some(pos) = find_boundary_across_buffers(&lookback_buf[..lookback_len], data_chunk, boundary) {
-                            match pos {
-                                (1, idx) => {
-                                    let end = idx.saturating_sub(4);
-                                    print!("{}", str::from_utf8(&lookback_buf[0..end]).unwrap());
-                                },
-                                (2, idx) => {
-                                    if idx >= 4 {
-                                        print!("{}", str::from_utf8(&lookback_buf[..lookback_len]).unwrap());
-                                        print!("{}", str::from_utf8(&data_chunk[0..idx-4]).unwrap());
-                                    } else {
-                                        let lookback_trim = 4 - idx;
-                                        let end = lookback_len.saturating_sub(lookback_trim);
-                                        print!("{}", str::from_utf8(&lookback_buf[..end]).unwrap());
-                                    }
-                                },
-                                _ => unreachable!()
-                            }
-                            println!("pos = {:?}", pos);
-                            break 'stream;
-                        } else {
-                            print!("{}", str::from_utf8(&lookback_buf[..lookback_len]).unwrap());
-
-                            if data_chunk.len() >= lookback_buf.len() {
-                                let safe_len = data_chunk.len() - lookback_buf.len();
-                                print!("{}", str::from_utf8(&data_chunk[..safe_len]).unwrap());
-
-                                let tail = &data_chunk[safe_len..];
-                                lookback_buf[..tail.len()].copy_from_slice(tail);
-                                lookback_len = tail.len();
+                        Step::ReadFilename => {
+                            if byte == '"' as u8 {
+                                step = Step::FindDataStart;
+                                pattern_idx = 0;
                             } else {
-                                let move_amt = data_chunk.len();
-                                lookback_buf.copy_within(move_amt.., 0);
-
-                                let start = lookback_buf.len() - move_amt;
-                                lookback_buf[start..].copy_from_slice(data_chunk);
-                                lookback_len = lookback_buf.len();
+                                filename[filename_len] = byte;
+                                filename_len += 1;
                             }
                         }
-                        continue 'stream;
+
+                        Step::FindDataStart => {
+                            let header_sep = b"\r\n\r\n";
+                            if byte == header_sep[pattern_idx] {
+                                pattern_idx += 1;
+                                if pattern_idx == header_sep.len() {
+                                    step = Step::StreamingBody;
+                                }
+                            } else {
+                                pattern_idx = 0;
+                            }
+                        }
+
+                        Step::StreamingBody => {
+                            let data_chunk = &buffer[i..n];
+
+                            if let Some(pos) = find_boundary_across_buffers(&lookback_buf[..lookback_len], data_chunk, boundary) {
+                                match pos {
+                                    (1, idx) => {
+                                        let end = idx.saturating_sub(4);
+                                        let buf = &lookback_buf[0..end];
+                                        vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                        file_size += buf.len() as i64;
+                                    },
+                                    (2, idx) => {
+                                        if idx >= 4 {
+                                            let buf = &lookback_buf[..lookback_len];
+                                            vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                            file_size += buf.len() as i64;
+
+                                            let buf = &data_chunk[0..idx-4];
+                                            vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                            file_size += buf.len() as i64;
+                                        } else {
+                                            let lookback_trim = 4 - idx;
+                                            let end = lookback_len.saturating_sub(lookback_trim);
+                                            let buf = &lookback_buf[..end];
+                                            vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                            file_size += buf.len() as i64;
+                                        }
+                                    },
+                                    _ => unreachable!()
+                                }
+                                println!("file upload success");
+                                break 'stream;
+                            } else {
+                                let buf = &lookback_buf[..lookback_len];
+                                vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                file_size += buf.len() as i64;
+
+                                if data_chunk.len() >= lookback_buf.len() {
+                                    let safe_len = data_chunk.len() - lookback_buf.len();
+                                    let buf = &data_chunk[..safe_len];
+                                    vm.write(new_file, buf).map_err(|_| "unable to write to new_file")?;
+                                    file_size += buf.len() as i64;
+
+                                    let tail = &data_chunk[safe_len..];
+                                    lookback_buf[..tail.len()].copy_from_slice(tail);
+                                    lookback_len = tail.len();
+                                } else {
+                                    let move_amt = data_chunk.len();
+                                    lookback_buf.copy_within(move_amt.., 0);
+
+                                    let start = lookback_buf.len() - move_amt;
+                                    lookback_buf[start..].copy_from_slice(data_chunk);
+                                    lookback_len = lookback_buf.len();
+                                }
+                            }
+                            continue 'stream;
+                        }
                     }
                 }
             }
+
+            vm.flush_file(new_file).map_err(|_| "unable to flush new_file")?;
+            vm.close_file(new_file).map_err(|_| "unable to close new_file")?;
+
+            {
+                let mut row = Row::new_in(esp_alloc::ExternalMemory);
+                row.push(Value::Chars(actual_name.as_bytes()));
+                row.push(Value::Chars(&filename[..filename_len]));
+                row.push(Value::Int(file_size));
+                db.insert_to_table(files_table, row, esp_alloc::ExternalMemory).map_err(|_| "unable to insert to table")?;
+            }
+
+            {
+                let mut row = Row::new_in(esp_alloc::ExternalMemory);
+                row.push(Value::Chars(b"files"));
+                row.push(Value::Int(cur_file_id + 1));
+                db.update_row(count_tracker_table, Value::Chars(b"files"), row, esp_alloc::ExternalMemory)
+                    .map_err(|_| "unable to update count_tracker_table to table")?;
+            }
+
+            Ok(Self)
+        } else {
+            Err("sdcard not active")
         }
-        
-        Ok(FileUploader { filename, filename_len })
     }
 }
 
-async fn handle_file_upload(path: String, file: FileUploader) -> impl IntoResponse {
-    let name = core::str::from_utf8(&file.filename[..file.filename_len])
-        .unwrap_or("unknown");
-
-    picoserve::response::DebugValue("")
+async fn handle_file_upload(file: FileUploader) -> impl IntoResponse {
+    "success"
 }
 
 async fn handle_fs(path: String) -> impl IntoResponse {
     let fman = get_file_manager();
     let file = fman.resolve_path_iter(&path).await;
-    ChunkedResponse::new(FileIterChunks::<FsBlockDevice, allocators::SimAllocator<23>> { 
+    ChunkedResponse::new(FsIterChunks::<FsBlockDevice, allocators::SimAllocator<23>> { 
         file, fman, allocator: esp_alloc::ExternalMemory
+    })
+}
+
+async fn handle_files(name: String) -> impl IntoResponse {
+    let fman = get_file_manager();
+    let db_dir = fman.open_dir(None, "DB").await;
+    ChunkedResponse::new(FilesIterChunks::<FsBlockDevice, allocators::SimAllocator<23>> { 
+        db_dir, fman, allocator: esp_alloc::ExternalMemory
     })
 }
 
@@ -484,6 +713,7 @@ fn router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
             Response::ok(HOME_PAGE).with_header("Content-Type", "text/html")
         }))
         .route(("/fs", CatchAll), get(handle_fs))
+        .route("/files", get(handle_files))
         .route(("/download", CatchAll), get(handle_download))
-        .route(("/upload", CatchAll), post(handle_file_upload))
+        .route("/upload", post(handle_file_upload))
 }

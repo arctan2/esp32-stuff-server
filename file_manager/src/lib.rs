@@ -100,10 +100,10 @@ impl <
         }
     }
 
-    pub async fn close_file(&self, file_type: FileType) {
+    pub async fn close_file_type(&self, file_type: FileType) {
         let state = self.state.lock().await;
 
-        if let CardState::Active{ ref vm, ref vol } = state.card_state {
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
             match file_type {
                 FileType::File(_, f) => {
                     let _ = vm.close_file(f);
@@ -115,57 +115,87 @@ impl <
         }
     }
 
-    pub async fn open_file<'a>(&self, dir: FileType, name: &'a str, mode: Mode) -> Result<FileType, Error<D::Error>> {
+    pub async fn open_file<'a>(&self, dir: RawDirectory, name: &'a str, mode: Mode) -> Result<(DirEntry, RawFile), Error<D::Error>> {
         let state = self.state.lock().await;
 
-        if let CardState::Active{ ref vm, ref vol } = state.card_state {
-            match dir {
-                FileType::Dir(d) => {
-                    match vm.find_directory_entry(d, name) {
-                        Ok(entry) => {
-                            if entry.attributes.is_directory() {
-                                return Err(Error::BadHandle);
-                            } else {
-                                let file = vm.open_file_in_dir(d, name, mode)?;
-                                return Ok(FileType::File(entry, file));
-                            }
-                        },
-                        Err(Error::NotFound) => {
-                            let file = vm.open_file_in_dir(d, name, mode)?;
-                            vm.flush_file(file)?;
-                            let entry = vm.find_directory_entry(d, name)?;
-                            return Ok(FileType::File(entry, file));
-                        },
-                        Err(e) => return Err(e)
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            match vm.find_directory_entry(dir, name) {
+                Ok(entry) => {
+                    if entry.attributes.is_directory() {
+                        return Err(Error::BadHandle);
+                    } else {
+                        let file = vm.open_file_in_dir(dir, name, mode)?;
+                        return Ok((entry, file));
                     }
                 },
-                _ => return Err(Error::BadHandle)
+                Err(Error::NotFound) => {
+                    let file = vm.open_file_in_dir(dir, name, mode)?;
+                    vm.flush_file(file)?;
+                    let entry = vm.find_directory_entry(dir, name)?;
+                    return Ok((entry, file));
+                },
+                Err(e) => return Err(e)
             }
         }
-        return Err(Error::NotFound);
+
+        Err(Error::NotFound)
     }
 
-    pub async fn mkdir<'a>(&self, dir: FileType, name: &'a str) -> Result<(), Error<D::Error>> {
+    pub async fn close_file<'a>(&self, file: RawFile) -> Result<(), Error<D::Error>> {
+        let state = self.state.lock().await;
+
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            return vm.close_file(file);
+        }
+        Err(Error::NotFound)
+    }
+
+    pub async fn mkdir<'a>(&self, dir: RawDirectory, name: &'a str) -> Result<(), Error<D::Error>> {
+        let state = self.state.lock().await;
+
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            return vm.make_dir_in_dir(dir, name);
+        }
+
+        Err(Error::NotFound)
+    }
+
+    pub async fn open_dir<'a>(&self, dir: Option<RawDirectory>, name: &'a str) -> Result<RawDirectory, Error<D::Error>> {
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
-            match dir {
-                FileType::Dir(d) => return vm.make_dir_in_dir(d, name),
-                _ => return Err(Error::BadHandle)
+            let root_dir =  vm.open_root_dir(*vol)?;
+            match vm.open_dir(root_dir, name) {
+                Ok(dir) => {
+                    let _ = vm.close_dir(root_dir);
+                    return Ok(dir);
+                },
+                Err(e) => {
+                    let _ = vm.close_dir(root_dir);
+                    return Err(e);
+                }
             }
         }
-        return Err(Error::NotFound);
+        Err(Error::NotFound)
     }
 
-    pub async fn root_dir(&self) -> Result<FileType, Error<D::Error>> {
+    pub async fn close_dir<'a>(&self, dir: RawDirectory) -> Result<(), Error<D::Error>> {
+        let state = self.state.lock().await;
+
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            return vm.close_dir(dir);
+        }
+        Err(Error::NotFound)
+    }
+
+    pub async fn root_dir(&self) -> Result<RawDirectory, Error<D::Error>> {
         let state = self.state.lock().await;
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
-            Ok(FileType::Dir(vm.open_root_dir(*vol)?))
-        } else {
-            Err(Error::NotFound)
+            return vm.open_root_dir(*vol);
         }
+        Err(Error::NotFound)
     }
-    
+
     pub async fn resolve_path_iter<'a>(&self, path: &'a str) -> Result<FileType, Error<D::Error>> {
         let state = self.state.lock().await;
 
