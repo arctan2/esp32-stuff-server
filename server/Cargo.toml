@@ -1,0 +1,11 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+allocator-api2 = { version = "0.3", default-features = false, features = ["alloc"] }
+picoserve = { version = "0.17.1", features = ["ws", "log", "json", "tokio"] }
+embedded-sdmmc = "0.9.0"
+alpa = { path = "../../../alpa", features = ["std"] }
+file_manager = { path = "../file_manager", features = ["tokio"] }

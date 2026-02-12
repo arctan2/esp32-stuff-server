@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["actual", "development", "file_manager"]
+members = ["actual", "development", "file_manager", "server"]
 
 [patch.crates-io]
 picoserve = { git = "https://github.com/sammhicks/picoserve.git", rev = "d68a535" }

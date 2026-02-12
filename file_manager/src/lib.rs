@@ -1,10 +1,15 @@
 mod runtime;
+pub mod consts;
+use alpa::embedded_sdmmc_ram_device::{allocators, block_device, timesource, fs};
+use crate::fs::{DbDirSdmmc};
+use crate::block_device::{FsBlockDeviceError, FsBlockDevice};
+use alpa::db::Database;
+use alpa::{Column, ColumnType, Value, Row};
+use std::sync::OnceLock;
 pub use runtime::{Channel, Signal, Mutex};
 use embedded_sdmmc::{
     BlockDevice,
     TimeSource,
-    File,
-    Directory,
     RawVolume,
     RawFile,
     RawDirectory,
@@ -57,7 +62,7 @@ impl <
 
     pub fn try_mount(&mut self) {
         if let CardState::NoCard { device, timer } = core::mem::replace(&mut self.card_state, CardState::Processing) {
-            let mut vm = VolumeManager::new(device, timer);
+            let vm = VolumeManager::new(device, timer);
             self.card_state = match vm.open_raw_volume(VolumeIdx(0)) {
                 Ok(vol) => CardState::Active{ vm, vol },
                 Err(_) => {
@@ -164,7 +169,7 @@ impl <
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
-            let root_dir =  vm.open_root_dir(*vol)?;
+            let root_dir = dir.unwrap_or(vm.open_root_dir(*vol)?);
             match vm.open_dir(root_dir, name) {
                 Ok(dir) => {
                     let _ = vm.close_dir(root_dir);
@@ -227,7 +232,7 @@ impl <
                             let prev_dir = cur_dir;
                             match vm.open_dir(cur_dir, name) {
                                 Ok(dir) => cur_dir = dir,
-                                Err(e) => {
+                                Err(_) => {
                                     break;
                                 }
                             }
@@ -236,7 +241,7 @@ impl <
                             break;
                         }
                     },
-                    Err(e) => {
+                    Err(_) => {
                         break;
                     }
                 }
@@ -273,3 +278,113 @@ impl <
     }
 }
 
+pub type BlkDev = block_device::FsBlockDevice;
+pub type ExtAlloc = allocators::SimAllocator<23>;
+pub type TimeSrc = timesource::DummyTimesource;
+pub type FMan = FileManager<BlkDev, TimeSrc, 4, 4, 1>;
+pub type FsError = FsBlockDeviceError;
+
+#[derive(Debug)]
+pub struct SyncFMan(pub FMan);
+
+unsafe impl Send for SyncFMan {}
+unsafe impl Sync for SyncFMan {}
+
+static FILE_MAN: OnceLock<SyncFMan> = OnceLock::new();
+
+pub fn init_file_manager(block_device: BlkDev, time_src: timesource::DummyTimesource) {
+    FILE_MAN.set(
+        SyncFMan(FileManager::new(block_device, time_src))
+    ).expect("initing twice file_manager");
+}
+
+pub fn get_file_manager() -> &'static FMan {
+    &FILE_MAN.get().expect("file_manager not initialized").0
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum InitError {
+    SdCard(embedded_sdmmc::Error<FsError>),
+    Database(alpa::db::Error<embedded_sdmmc::Error<FsError>>),
+}
+
+impl From<alpa::db::Error<embedded_sdmmc::Error<FsError>>> for InitError {
+    fn from(e: alpa::db::Error<embedded_sdmmc::Error<FsError>>) -> Self {
+        InitError::Database(e)
+    }
+}
+
+impl From<embedded_sdmmc::Error<FsError>> for InitError {
+    fn from(e: embedded_sdmmc::Error<FsError>) -> Self {
+        InitError::SdCard(e)
+    }
+}
+
+pub async fn init_file_system(allocator: ExtAlloc) -> Result<(), InitError>
+where 
+    embedded_sdmmc::Error<<FsBlockDevice as BlockDevice>::Error>: Into<embedded_sdmmc::Error<FsError>>
+{
+    let fman = get_file_manager();
+    let root_dir = fman.root_dir().await?;
+    fman.mkdir(root_dir.clone(), consts::DB_DIR).await?;
+    fman.mkdir(root_dir.clone(), consts::FILES_DIR).await?;
+    fman.mkdir(root_dir.clone(), consts::MUSIC_DIR).await?;
+
+    {
+        let db_dir = fman.open_dir(Some(root_dir), consts::DB_DIR).await?;
+        let _ = fman.close_dir(root_dir).await;
+        let state = fman.state.lock().await;
+
+        if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+            let stuff_dir = DbDirSdmmc::new(db_dir.to_directory(vm));
+            let mut db = Database::new_init(&stuff_dir, allocator.clone())?;
+
+            {
+                let name = Column::new("name", ColumnType::Chars).primary();
+                let count = Column::new("count", ColumnType::Int);
+                db.new_table_begin(consts::COUNT_TRACKER_TABLE);
+                db.add_column(name)?;
+                db.add_column(count)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            {
+                let name = Column::new("path", ColumnType::Chars).primary();
+                let count = Column::new("name", ColumnType::Chars);
+                let size = Column::new("size", ColumnType::Int);
+                db.new_table_begin(consts::FILES_TABLE);
+                db.add_column(name)?;
+                db.add_column(count)?;
+                db.add_column(size)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            {
+                let name = Column::new("path", ColumnType::Chars).primary();
+                let count = Column::new("name", ColumnType::Chars);
+                db.new_table_begin(consts::MUSIC_TABLE);
+                db.add_column(name)?;
+                db.add_column(count)?;
+                let _ = db.create_table(allocator.clone())?;
+            }
+
+            let count_tracker = db.get_table(consts::COUNT_TRACKER_TABLE, allocator.clone())?;
+
+            {
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(consts::FILES_TABLE.as_bytes()));
+                row.push(Value::Int(1));
+                db.insert_to_table(count_tracker, row, allocator.clone())?;
+            }
+
+            {
+                let mut row = Row::new_in(allocator.clone());
+                row.push(Value::Chars(consts::MUSIC_TABLE.as_bytes()));
+                row.push(Value::Int(1));
+                db.insert_to_table(count_tracker, row, allocator.clone())?;
+            }
+        }
+    }
+    Ok(())
+}

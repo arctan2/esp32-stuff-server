@@ -1,0 +1,27 @@
+<br>
+<br>
+<a id="download" href="" download="">Download File</a>
+
+<style>
+*{
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+html {
+	background-color: black;
+	color: white;
+	font-family: monospace;
+}
+
+body{
+	padding: 1rem;
+}
+</style>
+<script>
+const pathParts = window.location.href.split("/");
+const fname = pathParts[pathParts.length - 1];
+download.href = window.location.href.replace("/fs/", "/download/");
+download.setAttribute("download", fname);
+</script>

@@ -303,6 +303,7 @@ dependencies = [
  "postcard",
  "rand",
  "serde",
+ "server",
  "static_cell",
  "tokio",
 ]
@@ -1016,6 +1017,7 @@ dependencies = [
 name = "file_manager"
 version = "0.1.0"
 dependencies = [
+ "alpa",
  "embassy-sync 0.7.2",
  "embedded-sdmmc",
  "tokio",
@@ -1722,6 +1724,17 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+ "alpa",
+ "embedded-sdmmc",
+ "file_manager",
+ "picoserve",
 ]
 
 [[package]]
