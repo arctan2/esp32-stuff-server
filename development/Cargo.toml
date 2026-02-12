@@ -19,4 +19,4 @@ buddy_system_allocator = "0.12.0"
 alpa = { path = "../../../alpa", features = ["std"] }
 rand = "0.9.2"
 file_manager = { path = "../file_manager", features = ["tokio"] }
-server = { path = "../server" }
+server = { path = "../server", features = ["std-mode"] }

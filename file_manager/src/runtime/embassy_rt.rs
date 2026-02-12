@@ -4,7 +4,6 @@ use embassy_sync::signal::Signal as EmbassySignal;
 use embassy_sync::channel::Channel as EmbassyChannel;
 use embassy_sync::mutex::{Mutex as EmbassyMutex, MutexGuard as EmbassyMutexGuard};
 
-#[derive(Debug)]
 pub struct Channel<T, const N: usize> {
     ch: EmbassyChannel<CriticalSectionRawMutex, T, N>,
 }
@@ -19,11 +18,10 @@ impl<T, const N: usize> Channel<T, N> {
     }
 
     pub async fn recv(&self) -> T {
-        self.ch.recv().await
+        self.ch.receive().await
     }
 }
 
-#[derive(Debug)]
 pub struct Signal<T> {
     sig: EmbassySignal<CriticalSectionRawMutex, T>,
 }
@@ -61,7 +59,7 @@ impl <T> Mutex<T> {
         Self { m: EmbassyMutex::new(val) }
     }
 
-    pub async fn lock<'a>(&self) -> MutexGuard<'a, T> {
+    pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
         MutexGuard { g: self.m.lock().await }
     }
 }

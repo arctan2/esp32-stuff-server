@@ -1,25 +1,34 @@
 #![allow(nonstandard_style)]
-#![allow(unused)]
+
+#![no_std]
+extern crate alloc;
+
+// Manually bring in the "missing" no_std pieces
+pub(crate) mod internal_prelude {
+    pub use alloc::string::{String, ToString};
+    pub use alloc::vec::Vec;
+    pub use alloc::boxed::Box;
+    pub use core::result::Result::{self, Ok, Err};
+    pub use core::option::Option::{self, Some, None};
+}
+use internal_prelude::*;
+use alloc::format;
 
 pub mod file_uploader;
 
-use alpa::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource, fs};
-use crate::fs::{DbDirSdmmc};
+use alpa::embedded_sdmmc_ram_device::{esp_alloc};
+use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
 use alpa::db::Database;
-use alpa::{Column, ColumnType, Value, Row, Query, QueryExecutor};
-use crate::block_device::{FsBlockDevice};
-use crate::timesource::{DummyTimesource};
-use embedded_sdmmc::{BlockDevice, TimeSource, Error, RawDirectory, Mode};
-use picoserve::time::Duration;
-use picoserve::routing::{post, get, parse_path_segment, PathDescription};
-use picoserve::response::{IntoResponse, Response, DebugValue};
-use picoserve::request::{RequestBody, Request, RequestParts, Path};
-use picoserve::extract::{FromRequest, State};
+use alpa::{Query, QueryExecutor};
+use embedded_sdmmc::{BlockDevice, Error, RawDirectory};
+use picoserve::routing::{PathDescription};
+use picoserve::response::{IntoResponse};
+use picoserve::request::{RequestBody, RequestParts, Path};
+use picoserve::extract::{FromRequest};
 use picoserve::io::Read;
-use file_manager::{FileManager, Signal, Channel, FileType, CardState};
+use file_manager::{FileType, CardState};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
-use std::sync::OnceLock;
 use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
 use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager};
 use file_manager::consts;
@@ -180,7 +189,7 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
                     };
                 
 
-                    let mut files_table = match db.get_table("files", self.allocator.clone()) {
+                    let files_table = match db.get_table("files", self.allocator.clone()) {
                         Ok(t) => t,
                         Err(e) => {
                             chunk_writer.write_chunk(format!("table not found: {:?}", e).as_bytes()).await?;
@@ -205,7 +214,7 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
                                     chunk_writer.write_chunk(b"</a></div><br>").await?;
                                 }
                             },
-                            Err(e) => {
+                            Err(_) => {
                                 chunk_writer.write_chunk(b"<i>table empty</i><br>").await?;
                             }
                         };
@@ -241,9 +250,9 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for DownloadIterChunks<D, A> 
         match self.file {
             Ok(file) => {
                 match file {
-                    FileType::Dir(dir) => {
+                    FileType::Dir(_) => {
                     },
-                    FileType::File(ref entry, f) => {
+                    FileType::File(_, f) => {
                         let state = self.fman.state.lock().await;
                         if let CardState::Active{ ref vm, vol: _ } = state.card_state {
                             loop {
@@ -306,16 +315,20 @@ impl<'r, State> FromRequest<'r, State> for MusicUploader {
     }
 }
 
-pub async fn handle_file_upload(file: FileUploader) -> impl IntoResponse {
+pub async fn handle_file_upload(_: FileUploader) -> impl IntoResponse {
     "success"
 }
 
-pub async fn handle_music_upload(file: MusicUploader) -> impl IntoResponse {
+pub async fn handle_music_upload(_: MusicUploader) -> impl IntoResponse {
     "success"
 }
 
 pub async fn handle_fs(path: String) -> impl IntoResponse {
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
     let fman = get_file_manager();
+
     let file = fman.resolve_path_iter(&path).await;
     ChunkedResponse::new(FsIterChunks::<BlkDev, ExtAlloc> { 
         file, fman, allocator: esp_alloc::ExternalMemory
@@ -323,7 +336,11 @@ pub async fn handle_fs(path: String) -> impl IntoResponse {
 }
 
 pub async fn handle_files() -> impl IntoResponse {
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
     let fman = get_file_manager();
+
     let db_dir = fman.open_dir(None, consts::DB_DIR).await;
     ChunkedResponse::new(FilesIterChunks::<BlkDev, ExtAlloc> { 
         db_dir, fman, allocator: esp_alloc::ExternalMemory
@@ -331,7 +348,11 @@ pub async fn handle_files() -> impl IntoResponse {
 }
 
 pub async fn handle_download(path: String) -> impl IntoResponse {
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
     let fman = get_file_manager();
+
     let file = fman.resolve_path_iter(&path).await;
     ChunkedResponse::new(DownloadIterChunks::<BlkDev, ExtAlloc> { 
         file, fman, allocator: esp_alloc::ExternalMemory

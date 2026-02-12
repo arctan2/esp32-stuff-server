@@ -1,9 +1,9 @@
 #![allow(nonstandard_style)]
-use alpa::embedded_sdmmc_ram_device::{allocators, esp_alloc, timesource};
+use alpa::embedded_sdmmc_ram_device::{allocators, esp_alloc};
 use picoserve::time::Duration;
 use picoserve::routing::{post, get};
 use picoserve::response::{Response};
-use file_manager::{init_file_manager};
+use file_manager::{init_file_manager, DummyTimesource};
 use server::{CatchAll};
 use file_manager::{BlkDev, init_file_system};
 
@@ -13,7 +13,7 @@ static HOME_PAGE: &str = include_str!("./html/home.html");
 async fn main() {
     allocators::init_simulated_hardware();
     let sdcard = BlkDev::new("test_file.db").unwrap();
-    init_file_manager(sdcard, timesource::DummyTimesource);
+    init_file_manager(sdcard, DummyTimesource);
 
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 8000)).await.unwrap();
 

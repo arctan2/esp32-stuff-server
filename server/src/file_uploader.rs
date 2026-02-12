@@ -1,24 +1,14 @@
-#![allow(unused)]
-use alpa::embedded_sdmmc_ram_device::{allocators, block_device, esp_alloc, timesource, fs};
-use crate::fs::{DbDirSdmmc};
+use alpa::embedded_sdmmc_ram_device::{esp_alloc};
+use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
 use alpa::db::Database;
-use alpa::{Column, ColumnType, Value, Row, Query, QueryExecutor};
-use crate::block_device::{FsBlockDevice};
-use crate::timesource::{DummyTimesource};
-use embedded_sdmmc::{BlockDevice, TimeSource, Error, RawDirectory, Mode};
-use picoserve::time::Duration;
-use picoserve::routing::{post, get, parse_path_segment, PathDescription};
-use picoserve::response::{IntoResponse, Response, DebugValue};
-use picoserve::request::{RequestBody, Request, RequestParts, Path};
-use picoserve::extract::{FromRequest, State};
+use alpa::{Value, Row, Query, QueryExecutor};
+use embedded_sdmmc::{Mode};
+use picoserve::request::{RequestBody, RequestParts};
 use picoserve::io::Read;
-use file_manager::{FileManager, Signal, Channel, FileType, CardState};
-use allocator_api2::alloc::Allocator;
-use allocator_api2::vec::Vec;
-use std::sync::OnceLock;
-use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
+use file_manager::{CardState};
 use file_manager::{get_file_manager};
 use crate::consts;
+use alloc::format;
 
 enum Step {
     FindFilename,
@@ -62,7 +52,12 @@ pub async fn upload_file_to_dir<'r, R: Read>(
     table_and_count_tracker_name: &'static str
 ) -> Result<(), &'static str> {
     let table_and_count_tracker_name = table_and_count_tracker_name.as_bytes();
+
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
     let fman = get_file_manager();
+
     let db_dir = fman.open_dir(None, consts::DB_DIR).await.map_err(|_| "unable to open db")?;
 
     let state = fman.state.lock().await;
@@ -71,13 +66,13 @@ pub async fn upload_file_to_dir<'r, R: Read>(
         let db_dir = DbDirSdmmc::new(db_dir.to_directory(vm));
         let mut db = match Database::new_init(&db_dir, esp_alloc::ExternalMemory) {
             Ok(d) => d,
-            Err(e) => return Err("db init error".into())
+            Err(_) => return Err("db init error".into())
         };
         let count_tracker_table = db.get_table(consts::COUNT_TRACKER_TABLE, esp_alloc::ExternalMemory)
                                     .map_err(|_| "unable to get count_tracker table")?;
         let files_table = db.get_table(table_and_count_tracker_name, esp_alloc::ExternalMemory)
                             .map_err(|_| "unable to get files table")?;
-        let mut cur_file_id: i64 = -1;
+        let cur_file_id: i64;
 
         {
             let query = Query::<_, &str>::new(count_tracker_table, esp_alloc::ExternalMemory)
@@ -93,7 +88,7 @@ pub async fn upload_file_to_dir<'r, R: Read>(
                         return Err("bad init".into());
                     }
                 },
-                Err(e) => {
+                Err(_) => {
                     return Err("table empty".into());
                 }
             };
@@ -207,7 +202,6 @@ pub async fn upload_file_to_dir<'r, R: Read>(
                                 },
                                 _ => unreachable!()
                             }
-                            println!("file upload success");
                             break 'stream;
                         } else {
                             let buf = &lookback_buf[..lookback_len];
