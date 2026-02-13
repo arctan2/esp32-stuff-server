@@ -10,7 +10,6 @@ mod dhcp;
 
 use esp_backtrace as _;
 use types::{String};
-use allocator_api2::vec::Vec;
 use esp_println::{println};
 use esp_rtos::main;
 use embassy_executor::Spawner;
@@ -22,6 +21,14 @@ use sta_config::{StaConfigManager, CONFIG_MANAGER};
 use event_handler::{Event, EVENT_CHAN};
 use embassy_net::icmp::ping::{PingManager, PingParams};
 use embassy_net::icmp::PacketMetadata;
+use file_manager::{ExtAlloc, init_file_system};
+use esp_hal::{
+    gpio::{Level, Output, OutputConfig},
+    time::{Rate},
+    spi::{master::{Spi, Config}, Mode},
+    delay::{Delay},
+};
+use embedded_hal_bus::spi::ExclusiveDevice;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -37,6 +44,7 @@ async fn main(spawner: Spawner) {
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+
 
     let config_mgr = StaConfigManager::new(peripherals.FLASH);
     let config_bus = CONFIG_MANAGER.init(Mutex::new(config_mgr));
@@ -130,6 +138,45 @@ async fn main(spawner: Spawner) {
     let mut tx_meta = [PacketMetadata::EMPTY];
     let mut ping_manager = PingManager::new(sta_stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
     let mut tick = 0;
+
+    {
+        let sck  = peripherals.GPIO13;
+        let mosi = peripherals.GPIO14;
+        let miso = peripherals.GPIO32;
+
+        loop {
+            let mut spi = Spi::new(
+                unsafe { peripherals.SPI2.clone_unchecked() },
+                Config::default()
+                    .with_frequency(Rate::from_mhz(1))
+                    .with_mode(Mode::_0),
+            )
+            .unwrap()
+            .with_sck(unsafe { sck.clone_unchecked() })
+            .with_mosi(unsafe { mosi.clone_unchecked() })
+            .with_miso(unsafe { miso.clone_unchecked() });
+
+            let mut sd_cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
+
+            sd_cs.set_high();
+
+            // for _ in 0..100 {
+            //     let _ = spi.write(&[0xFF]);
+            // }
+
+            let delay = Delay::new();
+            let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
+
+            match init_file_system(spi_device, delay, ExtAlloc::default()).await {
+                Ok(()) => break,
+                Err(e) => {
+                    embassy_time::Timer::after_secs(1).await;
+                    println!("error: {:?}", e);
+                }
+            }
+        }
+    }
+
 
     loop {
         println!("tick {tick}");

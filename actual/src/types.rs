@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 extern crate alloc;
 use serde::{Deserialize, Serialize};
 pub use alloc::string::String;

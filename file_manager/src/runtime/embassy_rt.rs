@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use core::ops::{Deref, DerefMut};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::signal::Signal as EmbassySignal;

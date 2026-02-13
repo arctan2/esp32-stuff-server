@@ -5,6 +5,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use crate::event_handler::{Event, EVENT_CHAN};
 use crate::types::{WifiSsidPwd, WifiStatus};
+use server::CatchAll;
 
 static CONFIG_PAGE: &str = include_str!("./html/config.html");
 static HOME_PAGE: &str = include_str!("./html/home.html");
@@ -66,5 +67,11 @@ pub fn router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
         .route("/status", get(status))
         .route("/software-reset", get(software_reset))
         .route("/get-flash-data", get(get_flash_data))
+
+        .route(("/fs", CatchAll), get(server::handle_fs))
+        .route("/files", get(server::handle_files))
+        .route(("/download", CatchAll), get(server::handle_download))
+        .route("/upload", post(server::handle_file_upload))
+        .route("/upload-music", post(server::handle_music_upload))
 }
 

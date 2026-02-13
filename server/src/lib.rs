@@ -5,6 +5,7 @@ extern crate alloc;
 
 // Manually bring in the "missing" no_std pieces
 pub(crate) mod internal_prelude {
+    #![allow(unused)]
     pub use alloc::string::{String, ToString};
     pub use alloc::vec::Vec;
     pub use alloc::boxed::Box;
@@ -16,11 +17,10 @@ use alloc::format;
 
 pub mod file_uploader;
 
-use alpa::embedded_sdmmc_ram_device::{esp_alloc};
 use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
 use alpa::db::Database;
 use alpa::{Query, QueryExecutor};
-use embedded_sdmmc::{BlockDevice, Error, RawDirectory};
+use embedded_sdmmc::{BlockDevice, RawDirectory};
 use picoserve::routing::{PathDescription};
 use picoserve::response::{IntoResponse};
 use picoserve::request::{RequestBody, RequestParts, Path};
@@ -30,8 +30,11 @@ use file_manager::{FileType, CardState};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
-use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager};
+use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager, FManError};
 use file_manager::consts;
+
+#[cfg(feature = "embassy-mode")]
+use file_manager::{ConcreteSpi, ConcreteDelay};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CatchAll;
@@ -57,7 +60,10 @@ impl<T: Copy + core::fmt::Debug> PathDescription<T> for CatchAll {
 }
 
 pub struct FsIterChunks<D: BlockDevice, A: Allocator + Clone> {
-    pub file: Result<FileType, Error<D::Error>>,
+    pub file: Result<FileType, FManError<D::Error>>,
+    #[cfg(feature = "embassy-mode")]
+    pub fman: &'static FMan<ConcreteSpi<'static>, ConcreteDelay>,
+    #[cfg(feature = "std-mode")]
     pub fman: &'static FMan,
     pub allocator: A
 }
@@ -161,7 +167,10 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FsIterChunks<D, A> {
 }
 
 pub struct FilesIterChunks<D: BlockDevice, A: Allocator + Clone> {
-    pub db_dir: Result<RawDirectory, Error<D::Error>>,
+    pub db_dir: Result<RawDirectory, FManError<D::Error>>,
+    #[cfg(feature = "embassy-mode")]
+    pub fman: &'static FMan<ConcreteSpi<'static>, ConcreteDelay>,
+    #[cfg(feature = "std-mode")]
     pub fman: &'static FMan,
     pub allocator: A
 }
@@ -233,7 +242,10 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
 }
 
 pub struct DownloadIterChunks<D: BlockDevice, A: Allocator + Clone> {
-    pub file: Result<FileType, Error<D::Error>>,
+    pub file: Result<FileType, FManError<D::Error>>,
+    #[cfg(feature = "embassy-mode")]
+    pub fman: &'static FMan<ConcreteSpi<'static>, ConcreteDelay>,
+    #[cfg(feature = "std-mode")]
     pub fman: &'static FMan,
     pub allocator: A
 }
@@ -330,9 +342,18 @@ pub async fn handle_fs(path: String) -> impl IntoResponse {
     let fman = get_file_manager();
 
     let file = fman.resolve_path_iter(&path).await;
-    ChunkedResponse::new(FsIterChunks::<BlkDev, ExtAlloc> { 
-        file, fman, allocator: esp_alloc::ExternalMemory
-    })
+
+    #[cfg(feature = "std-mode")] {
+        ChunkedResponse::new(FsIterChunks::<BlkDev, ExtAlloc> { 
+            file, fman, allocator: ExtAlloc::default()
+        })
+    }
+
+    #[cfg(feature = "embassy-mode")] {
+        ChunkedResponse::new(FsIterChunks::<BlkDev<ConcreteSpi<'static>, ConcreteDelay>, ExtAlloc> { 
+            file, fman, allocator: ExtAlloc::default()
+        })
+    }
 }
 
 pub async fn handle_files() -> impl IntoResponse {
@@ -342,9 +363,17 @@ pub async fn handle_files() -> impl IntoResponse {
     let fman = get_file_manager();
 
     let db_dir = fman.open_dir(None, consts::DB_DIR).await;
-    ChunkedResponse::new(FilesIterChunks::<BlkDev, ExtAlloc> { 
-        db_dir, fman, allocator: esp_alloc::ExternalMemory
-    })
+    #[cfg(feature = "std-mode")] {
+        ChunkedResponse::new(FilesIterChunks::<BlkDev, ExtAlloc> { 
+            db_dir, fman, allocator: ExtAlloc::default()
+        })
+    }
+
+    #[cfg(feature = "embassy-mode")] {
+        ChunkedResponse::new(FilesIterChunks::<BlkDev<ConcreteSpi<'static>, ConcreteDelay>, ExtAlloc> { 
+            db_dir, fman, allocator: ExtAlloc::default()
+        })
+    }
 }
 
 pub async fn handle_download(path: String) -> impl IntoResponse {
@@ -354,7 +383,16 @@ pub async fn handle_download(path: String) -> impl IntoResponse {
     let fman = get_file_manager();
 
     let file = fman.resolve_path_iter(&path).await;
-    ChunkedResponse::new(DownloadIterChunks::<BlkDev, ExtAlloc> { 
-        file, fman, allocator: esp_alloc::ExternalMemory
-    })
+
+    #[cfg(feature = "std-mode")] {
+        ChunkedResponse::new(DownloadIterChunks::<BlkDev, ExtAlloc> { 
+            file, fman, allocator: ExtAlloc::default()
+        })
+    }
+
+    #[cfg(feature = "embassy-mode")] {
+        ChunkedResponse::new(DownloadIterChunks::<BlkDev<ConcreteSpi<'static>, ConcreteDelay>, ExtAlloc> { 
+            file, fman, allocator: ExtAlloc::default()
+        })
+    }
 }

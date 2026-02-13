@@ -1,11 +1,11 @@
 #![allow(nonstandard_style)]
-use alpa::embedded_sdmmc_ram_device::{allocators, esp_alloc};
+use alpa::embedded_sdmmc_ram_device::{allocators};
 use picoserve::time::Duration;
 use picoserve::routing::{post, get};
 use picoserve::response::{Response};
 use file_manager::{init_file_manager, DummyTimesource};
 use server::{CatchAll};
-use file_manager::{BlkDev, init_file_system};
+use file_manager::{BlkDev, init_file_system, ExtAlloc};
 
 static HOME_PAGE: &str = include_str!("./html/home.html");
 
@@ -29,7 +29,7 @@ async fn main() {
     tokio::task::LocalSet::new()
         .run_until(async {
             loop {
-                match init_file_system(esp_alloc::ExternalMemory).await {
+                match init_file_system(ExtAlloc::default()).await {
                     Ok(()) => break,
                     Err(e) => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;

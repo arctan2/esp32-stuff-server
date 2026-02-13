@@ -1,3 +1,4 @@
+#![allow(unused)]
 use core::ops::{Deref, DerefMut};
 
 #[cfg(feature = "tokio")]

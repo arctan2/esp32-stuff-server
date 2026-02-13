@@ -1061,6 +1061,7 @@ dependencies = [
  "embedded-sdmmc",
  "esp-alloc",
  "esp-hal",
+ "esp-println",
  "tokio",
 ]
 
@@ -1775,6 +1776,7 @@ dependencies = [
  "allocator-api2",
  "alpa",
  "embedded-sdmmc",
+ "esp-alloc",
  "file_manager",
  "picoserve",
 ]

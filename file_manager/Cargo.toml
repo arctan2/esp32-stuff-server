@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 tokio = ["dep:tokio"]
-embassy = ["dep:embassy-sync", "dep:embedded-hal", "dep:esp-hal", "dep:embedded-hal-bus", "dep:esp-alloc"]
+embassy = ["dep:embassy-sync", "dep:embedded-hal", "dep:esp-hal", "dep:embedded-hal-bus", "dep:esp-alloc", "dep:esp-println"]
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"], optional = true }
@@ -17,3 +17,4 @@ embedded-hal = { version = "1.0.0", optional = true }
 embedded-hal-bus = { version = "0.3.0", optional = true }
 esp-hal = { version = "~1.0", features = ["esp32", "unstable", "psram"], optional = true }
 allocator-api2 = { version = "0.3", default-features = false, features = ["alloc"] }
+esp-println = { version = "0.16.1", features = ["esp32", "log-04"], optional = true }
