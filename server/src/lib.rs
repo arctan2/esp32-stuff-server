@@ -1,4 +1,5 @@
 #![allow(nonstandard_style)]
+#![feature(impl_trait_in_assoc_type)]
 
 #![no_std]
 extern crate alloc;

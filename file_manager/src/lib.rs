@@ -126,6 +126,7 @@ pub struct FileManager<
 pub enum FManError<E: core::fmt::Debug> {
     SdErr(embedded_sdmmc::Error<E>),
     DbErr(alpa::db::Error<embedded_sdmmc::Error<E>>),
+    ServerErr(&'static str),
     CardNotActive,
     IsDir
 }
@@ -141,6 +142,22 @@ impl<E: core::fmt::Debug> From<embedded_sdmmc::Error<E>> for FManError<E> {
     fn from(e: embedded_sdmmc::Error<E>) -> Self {
         FManError::SdErr(e)
     }
+}
+
+impl<E: core::fmt::Debug> From<&'static str> for FManError<E> {
+    fn from(e: &'static str) -> Self {
+        FManError::ServerErr(e)
+    }
+}
+
+pub trait AsyncRootFn<D, T, R> 
+where 
+    D: embedded_sdmmc::BlockDevice, 
+    T: embedded_sdmmc::TimeSource 
+{
+    type Fut<'a>: core::future::Future<Output = Result<R, FManError<D::Error>>> + 'a 
+    where Self: 'a, D: 'a, T: 'a;
+    fn call<'a>(self, dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a>;
 }
 
 impl <
@@ -248,15 +265,14 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn with_root_dir_async<F, Fut, R>(&self, f: F) -> Result<R, FManError<D::Error>>
+    pub async fn with_root_dir_async<F, R>(&self, f: F) -> Result<R, FManError<D::Error>>
     where
-        F: FnOnce(RawDirectory, &VolumeManager<D, T, 4, 4, 1>) -> Fut,
-        Fut: core::future::Future<Output = Result<R, FManError<D::Error>>>,
+        F: for<'a> AsyncRootFn<D, T, R>,
     {
         let state = self.state.lock().await;
         if let CardState::Active { ref vm, ref vol } = state.card_state {
             let root = Self::root_dir(vm, vol)?;
-            return f(root, vm).await;
+            return f.call(root, vm).await;
         }
         Err(FManError::CardNotActive)
     }
