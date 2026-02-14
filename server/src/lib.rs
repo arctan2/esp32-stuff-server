@@ -4,7 +4,6 @@
 #![no_std]
 extern crate alloc;
 
-// Manually bring in the "missing" no_std pieces
 pub(crate) mod internal_prelude {
     #![allow(unused)]
     pub use alloc::string::{String, ToString};
@@ -21,18 +20,16 @@ pub mod file_uploader;
 use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
 use alpa::db::Database;
 use alpa::{Query, QueryExecutor};
-use embedded_sdmmc::{BlockDevice, RawDirectory};
+use embedded_sdmmc::{BlockDevice, RawDirectory, TimeSource, VolumeManager};
 use picoserve::routing::{PathDescription};
 use picoserve::response::{IntoResponse};
 use picoserve::request::{RequestBody, RequestParts, Path};
 use picoserve::extract::{FromRequest};
 use picoserve::io::Read;
-use file_manager::{FileType, CardState};
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
-use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager, FManError};
-use file_manager::consts;
+use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager, FManError, FileType, CardState, consts, AsyncRootFn};
 
 #[cfg(feature = "embassy-mode")]
 use file_manager::{ConcreteSpi, ConcreteDelay};
@@ -167,16 +164,100 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FsIterChunks<D, A> {
     }
 }
 
-pub struct FilesIterChunks<D: BlockDevice, A: Allocator + Clone> {
-    pub db_dir: Result<RawDirectory, FManError<D::Error>>,
+struct HandleFilesAsync<W: picoserve::io::Write> {
+    chunk_writer: ChunkWriter<W>,
+}
+
+impl<W, D, T> AsyncRootFn<D, T, Result<ChunksWritten, W::Error>> for HandleFilesAsync<W>
+where 
+    W: picoserve::io::Write,
+    D: BlockDevice,
+    T: TimeSource,
+{
+    type Fut<'a> = impl core::future::Future<Output = Result<Result<ChunksWritten, W::Error>, FManError<D::Error>>>
+                    + 'a where Self: 'a, D: 'a, T: 'a;
+
+    fn call<'a>(mut self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+        async move {
+            let root_dir = root_dir.to_directory(vm);
+            let allocator = ExtAlloc::default();
+
+            match root_dir.open_dir(consts::DB_DIR) {
+                Ok(dir) => {
+                    let db_dir = DbDirSdmmc::new(dir);
+                    let mut db = match Database::new_init(&db_dir, allocator.clone()) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            if let Err(e) = self.chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await {
+                                return Ok(Err(e));
+                            }
+                            return Ok(self.chunk_writer.finalize().await);
+                        }
+                    };
+                
+
+                    let files_table = match db.get_table("files", allocator.clone()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            if let Err(e) = self.chunk_writer.write_chunk(format!("table not found: {:?}", e).as_bytes()).await {
+                                return Ok(Err(e));
+                            }
+                            return Ok(self.chunk_writer.finalize().await);
+                        }
+                    };
+
+                    {
+                        let query = Query::<_, &str>::new(files_table, allocator.clone());
+                        match QueryExecutor::new(
+                            query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
+                            &db.file_handler.page_rw.as_ref().unwrap()
+                        ) {
+                            Ok(mut exec) => {
+                                while let Ok(row) = exec.next() {
+                                    let actual_name = unsafe { core::str::from_utf8_unchecked(row[0].to_chars().unwrap()) };
+                                    let name = unsafe { core::str::from_utf8_unchecked(row[1].to_chars().unwrap()) };
+                                    if let Err(e) = write!(
+                                        self.chunk_writer,
+                                        "<div><span class=\"size\">{} B</span><a>{};{}</a></div><br>",
+                                        row[2].to_int().unwrap(),
+                                        actual_name,
+                                        name
+                                    ).await {
+                                        return Ok(Err(e));
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                if let Err(e) = self.chunk_writer.write_chunk(b"<i>table empty</i><br>").await {
+                                    return Ok(Err(e));
+                                }
+                            }
+                        };
+                    }
+
+                    if let Err(e) = self.chunk_writer.write_chunk(include_str!("./html/files.html").as_bytes()).await {
+                        return Ok(Err(e));
+                    }
+                },
+                Err(e) => {
+                    if let Err(e) = self.chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await {
+                        return Ok(Err(e));
+                    }
+                }
+            }
+            return Ok(self.chunk_writer.finalize().await);
+        }
+    }
+}
+
+pub struct FilesIterChunks {
     #[cfg(feature = "embassy-mode")]
     pub fman: &'static FMan<ConcreteSpi<'static>, ConcreteDelay>,
     #[cfg(feature = "std-mode")]
     pub fman: &'static FMan,
-    pub allocator: A
 }
 
-impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
+impl Chunks for FilesIterChunks {
     fn content_type(&self) -> &'static str {
         "text/html"
     }
@@ -185,60 +266,15 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FilesIterChunks<D, A> {
         self,
         mut chunk_writer: ChunkWriter<W>,
     ) -> Result<ChunksWritten, W::Error> {
-        match self.db_dir {
-            Ok(dir) => {
-                let state = self.fman.state.lock().await;
-                if let CardState::Active{ ref vm, vol: _ } = state.card_state {
-                    let db_dir = DbDirSdmmc::new(dir.to_directory(vm));
-                    let mut db = match Database::new_init(&db_dir, self.allocator.clone()) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
-                            return chunk_writer.finalize().await;
-                        }
-                    };
-                
-
-                    let files_table = match db.get_table("files", self.allocator.clone()) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            chunk_writer.write_chunk(format!("table not found: {:?}", e).as_bytes()).await?;
-                            return chunk_writer.finalize().await;
-                        }
-                    };
-
-                    {
-                        let query = Query::<_, &str>::new(files_table, self.allocator.clone());
-                        match QueryExecutor::new(
-                            query, &mut db.table_buf, &mut db.buf1, &mut db.buf2,
-                            &db.file_handler.page_rw.as_ref().unwrap()
-                        ) {
-                            Ok(mut exec) => {
-                                while let Ok(row) = exec.next() {
-                                    chunk_writer.write_chunk(b"<div><span class=\"size\">").await?;
-                                    chunk_writer.write_chunk(format!("{} B", row[2].to_int().unwrap()).as_bytes()).await?;
-                                    chunk_writer.write_chunk(b"</span><a>").await?;
-                                    chunk_writer.write_chunk(row[0].to_chars().unwrap()).await?;
-                                    chunk_writer.write_chunk(b";").await?;
-                                    chunk_writer.write_chunk(row[1].to_chars().unwrap()).await?;
-                                    chunk_writer.write_chunk(b"</a></div><br>").await?;
-                                }
-                            },
-                            Err(_) => {
-                                chunk_writer.write_chunk(b"<i>table empty</i><br>").await?;
-                            }
-                        };
-                    }
-
-                    chunk_writer.write_chunk(include_str!("./html/files.html").as_bytes()).await?;
-                }
-            },
-            Err(e) => {
-                chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await?;
+        if self.fman.is_card_active().await {
+            match self.fman.with_root_dir_async(HandleFilesAsync { chunk_writer }).await {
+                Ok(res) => res,
+                Err(_) => unreachable!()
             }
+        } else {
+            chunk_writer.write_chunk(b"SD Card not active").await?;
+            chunk_writer.finalize().await
         }
-
-        chunk_writer.finalize().await
     }
 }
 
@@ -363,16 +399,15 @@ pub async fn handle_files() -> impl IntoResponse {
     #[cfg(feature = "std-mode")]
     let fman = get_file_manager();
 
-    let db_dir = fman.open_dir(None, consts::DB_DIR).await;
     #[cfg(feature = "std-mode")] {
-        ChunkedResponse::new(FilesIterChunks::<BlkDev, ExtAlloc> { 
-            db_dir, fman, allocator: ExtAlloc::default()
+        ChunkedResponse::new(FilesIterChunks { 
+            fman
         })
     }
 
     #[cfg(feature = "embassy-mode")] {
-        ChunkedResponse::new(FilesIterChunks::<BlkDev<ConcreteSpi<'static>, ConcreteDelay>, ExtAlloc> { 
-            db_dir, fman, allocator: ExtAlloc::default()
+        ChunkedResponse::new(FilesIterChunks { 
+            fman
         })
     }
 }

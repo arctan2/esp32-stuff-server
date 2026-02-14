@@ -50,11 +50,11 @@ struct FileUploaderAsync<'r, R: Read> {
     table_and_count_tracker_name: &'static str
 }
 
-impl<'r, R, D, T> AsyncRootFn<D, T, ()> for FileUploaderAsync<'r, R> 
+impl<'r, R, D, T> AsyncRootFn<D, T, ()> for FileUploaderAsync<'r, R>
 where 
     D: BlockDevice,
     T: TimeSource,
-    R: Read,
+    R: Read
 {
     type Fut<'a> = impl core::future::Future<Output = Result<(), FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
 

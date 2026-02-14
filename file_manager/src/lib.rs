@@ -176,11 +176,7 @@ impl <
 
     pub async fn is_card_active(&self) -> bool {
         let state = self.state.lock().await;
-
-        match state.card_state {
-            CardState::Active{ vm: _, vol: _ } => true,
-            _ => false
-        }
+        matches!(state.card_state, CardState::Active { .. })
     }
 
     pub async fn try_mount(&self) {
