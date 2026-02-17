@@ -11,6 +11,7 @@ use core::ptr::NonNull;
 use esp_println::{println};
 pub use embedded_sdmmc::{SdCard as FsBlockDevice, SdCardError};
 pub use embassy_sync::once_lock::OnceLock;
+use alpa::embedded_sdmmc_fs::VM;
 
 pub struct EspAlloc(pub esp_alloc::ExternalMemory);
 
@@ -100,14 +101,35 @@ where
         let root_dir = FileManager::<FsBlockDevice<ConcreteSpi<'static>, ConcreteDelay>, DummyTimesource, 4, 4, 1>
                                   ::root_dir(vm, vol)?
                                   .to_directory(vm);
-        let _ = root_dir.make_dir_in_dir(consts::DB_DIR);
-        let _ = root_dir.make_dir_in_dir(consts::FILES_DIR);
-        let _ = root_dir.make_dir_in_dir(consts::MUSIC_DIR);
+        let _ = root_dir.make_dir_in_dir(consts::DB_DIR).or_else(|e| {
+            if matches!(e, embedded_sdmmc::Error::DirAlreadyExists) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
+        let _ = root_dir.make_dir_in_dir(consts::FILES_DIR).or_else(|e| {
+            if matches!(e, embedded_sdmmc::Error::DirAlreadyExists) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
+        let _ = root_dir.make_dir_in_dir(consts::MUSIC_DIR).or_else(|e| {
+            if matches!(e, embedded_sdmmc::Error::DirAlreadyExists) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
+
+        println!("created all dirs");
 
         {
-            let db_dir = root_dir.open_dir(consts::DB_DIR)?;
+            let db_dir = root_dir.open_dir(consts::DB_DIR)?.to_raw_directory();
             let stuff_dir = DbDirSdmmc::new(db_dir);
-            let mut db = Database::new_init(&stuff_dir, allocator.clone())?;
+            let mut db = Database::new_init(VM::new(vm), stuff_dir, allocator.clone())?;
+            println!("db init success");
 
             {
                 let name = Column::new("name", ColumnType::Chars).primary();
@@ -115,8 +137,16 @@ where
                 db.new_table_begin(consts::COUNT_TRACKER_TABLE);
                 db.add_column(name)?;
                 db.add_column(count)?;
-                let _ = db.create_table(allocator.clone())?;
+                let _ = db.create_table(allocator.clone()).or_else(|e| {
+                    if matches!(e, alpa::db::Error::DuplicateKey) {
+                        Ok(0)
+                    } else {
+                        Err(e)
+                    }
+                })?;
             }
+
+            println!("count_tracker done");
 
             {
                 let name = Column::new("path", ColumnType::Chars).primary();
@@ -126,8 +156,16 @@ where
                 db.add_column(name)?;
                 db.add_column(count)?;
                 db.add_column(size)?;
-                let _ = db.create_table(allocator.clone())?;
+                let _ = db.create_table(allocator.clone()).or_else(|e| {
+                    if matches!(e, alpa::db::Error::DuplicateKey) {
+                        Ok(0)
+                    } else {
+                        Err(e)
+                    }
+                })?;
             }
+
+            println!("files table done");
 
             {
                 let name = Column::new("path", ColumnType::Chars).primary();
@@ -135,8 +173,15 @@ where
                 db.new_table_begin(consts::MUSIC_TABLE);
                 db.add_column(name)?;
                 db.add_column(count)?;
-                let _ = db.create_table(allocator.clone())?;
+                let _ = db.create_table(allocator.clone()).or_else(|e| {
+                    if matches!(e, alpa::db::Error::DuplicateKey) {
+                        Ok(0)
+                    } else {
+                        Err(e)
+                    }
+                })?;
             }
+            println!("music table done");
 
             let count_tracker = db.get_table(consts::COUNT_TRACKER_TABLE, allocator.clone())?;
 
@@ -144,15 +189,32 @@ where
                 let mut row = Row::new_in(allocator.clone());
                 row.push(Value::Chars(consts::FILES_TABLE.as_bytes()));
                 row.push(Value::Int(1));
-                db.insert_to_table(count_tracker, row, allocator.clone())?;
+                let _ = db.insert_to_table(count_tracker, row, allocator.clone()).or_else(|e| {
+                    if matches!(e, alpa::db::Error::DuplicateKey) {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })?;
             }
+
+            println!("insert files_table to count_tracker table done");
 
             {
                 let mut row = Row::new_in(allocator.clone());
                 row.push(Value::Chars(consts::MUSIC_TABLE.as_bytes()));
                 row.push(Value::Int(1));
-                db.insert_to_table(count_tracker, row, allocator.clone())?;
+                let _ = db.insert_to_table(count_tracker, row, allocator.clone()).or_else(|e| {
+                    if matches!(e, alpa::db::Error::DuplicateKey) {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })?;
             }
+            println!("insert music_table to count_tracker table done");
+
+            println!("closed db successfully");
 
             Ok(())
         }

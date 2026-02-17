@@ -3,24 +3,27 @@
 #![feature(alloc_error_handler)]
 
 extern crate alloc;
+mod types;
 
 use esp_backtrace as _;
 use esp_alloc as _;
-use esp_hal::{
-    clock::CpuClock,
-    gpio::{Level, Output, OutputConfig, Input, InputConfig, Pull},
-    main,
-    time::{Duration, Instant, Rate},
-
-    spi::{master::{Spi, Config}},
-    delay::{Delay},
-};
-use esp_println::println;
 use embedded_sdmmc::{SdCard, TimeSource, Timestamp};
-use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::SpiBus;
-use embedded_sdmmc::{VolumeManager, Mode};
+use embedded_sdmmc::{VolumeManager};
+use esp_rtos::main;
+
+use types::{String};
+use esp_println::{println};
+use embassy_executor::Spawner;
+use file_manager::{ExtAlloc, init_file_system};
+use esp_hal::{
+    gpio::{Level, Output, OutputConfig},
+    time::{Rate},
+    spi::{master::{Spi, Config}, Mode},
+    delay::{Delay},
+};
+use embedded_hal_bus::spi::ExclusiveDevice;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -44,97 +47,102 @@ fn disable_sim800L_modem(gpio4: esp_hal::peripherals::GPIO4, gpio23: esp_hal::pe
 }
 
 #[main]
-fn main() -> ! {
-    // esp_alloc::heap_allocator!(size: 32 * 1024);
+async fn main(spawner: Spawner) {
+    esp_println::logger::init_logger_from_env();
 
     let config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    esp_alloc::heap_allocator!(size: 64 * 1024);
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+
+    let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0);
+
     disable_sim800L_modem(peripherals.GPIO4, peripherals.GPIO23);
 
-    let sck  = peripherals.GPIO13; 
-    let mosi = peripherals.GPIO14;
-    let miso = peripherals.GPIO32;
+    // let sck  = peripherals.GPIO13; 
+    // let mosi = peripherals.GPIO14;
+    // let miso = peripherals.GPIO32;
 
-    let mut spi = esp_hal::spi::master::Spi::new(
-        peripherals.SPI2,
-        esp_hal::spi::master::Config::default()
-            .with_frequency(esp_hal::time::Rate::from_mhz(1))
-            .with_mode(esp_hal::spi::Mode::_0),
-    )
-    .unwrap()
-    .with_sck(sck)
-    .with_mosi(mosi)
-    .with_miso(miso);
+    // let mut spi = esp_hal::spi::master::Spi::new(
+    //     peripherals.SPI2,
+    //     esp_hal::spi::master::Config::default()
+    //         .with_frequency(esp_hal::time::Rate::from_mhz(1))
+    //         .with_mode(esp_hal::spi::Mode::_0),
+    // )
+    // .unwrap()
+    // .with_sck(sck)
+    // .with_mosi(mosi)
+    // .with_miso(miso);
 
-    let mut sd_cs = Output::new(peripherals.GPIO33, Level::High, OutputConfig::default());
+    // let mut sd_cs = Output::new(peripherals.GPIO33, Level::High, OutputConfig::default());
 
-    sd_cs.set_high();
+    // sd_cs.set_high();
 
-    for _ in 0..100 {
-        let _ = spi.write(&[0xFF]);
-    }
+    // for _ in 0..100 {
+    //     let _ = spi.write(&[0xFF]);
+    // }
 
-    let mut delay = esp_hal::delay::Delay::new();
-    let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
-    let sdcard = SdCard::new(spi_device, delay);
+    // let mut delay = esp_hal::delay::Delay::new();
+    // let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
+    // let sdcard = SdCard::new(spi_device, delay);
 
-    loop {
-        match sdcard.num_bytes() {
-            Ok(size) => {
-                let size_gb = size as f64 / 1024.0 / 1024.0 / 1024.0;
-                esp_println::println!("Card size: {} bytes ({:.2} GB)", size, size_gb);
-                break;
-            }
-            Err(e) => esp_println::println!("Error getting size: {:?}", e),
-        }
-        esp_hal::delay::Delay::new().delay_ms(1000u32);
-    }
+    // loop {
+    //     match sdcard.num_bytes() {
+    //         Ok(size) => {
+    //             let size_gb = size as f64 / 1024.0 / 1024.0 / 1024.0;
+    //             esp_println::println!("Card size: {} bytes ({:.2} GB)", size, size_gb);
+    //             break;
+    //         }
+    //         Err(e) => esp_println::println!("Error getting size: {:?}", e),
+    //     }
+    //     esp_hal::delay::Delay::new().delay_ms(1000u32);
+    // }
 
-    let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource::default());
+    // let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource::default());
 
-    match volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)) {
-        Ok(mut volume) => {
-            let mut root_dir = volume.open_root_dir().expect("Failed to open root dir");
+    {
+        let sck  = peripherals.GPIO13;
+        let mosi = peripherals.GPIO14;
+        let miso = peripherals.GPIO32;
 
-            esp_println::println!("Listing Directory Contents:");
+        loop {
+            let mut spi = Spi::new(
+                unsafe { peripherals.SPI2.clone_unchecked() },
+                Config::default()
+                    .with_frequency(Rate::from_mhz(1))
+                    .with_mode(Mode::_0),
+            )
+            .unwrap()
+            .with_sck(unsafe { sck.clone_unchecked() })
+            .with_mosi(unsafe { mosi.clone_unchecked() })
+            .with_miso(unsafe { miso.clone_unchecked() });
 
-            root_dir.iterate_dir(|entry| {
-                esp_println::println!(
-                    "  {} | Name: {} | Size: {} bytes",
-                    if entry.attributes.is_directory() { "[DIR] " } else { "[FILE]" },
-                    entry.name,
-                    entry.size
-                );
-            }).expect("Failed to iterate directory");
-            match root_dir.open_file_in_dir("COOL_F~1.TXT", Mode::ReadOnly) {
-                Ok(mut file) => {
-                    let mut buffer = [0u8; 64]; 
+            let mut sd_cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
 
-                    let bytes_read = file.read(&mut buffer).expect("Error reading file");
+            sd_cs.set_high();
 
-                    if let Ok(content) = core::str::from_utf8(&buffer[..bytes_read]) {
-                        esp_println::println!("--- FILE CONTENT START ---");
-                        esp_println::println!("{}", content);
-                        esp_println::println!("--- FILE CONTENT END ---");
-                        esp_println::println!("Read {} bytes successfully.", bytes_read);
-                    } else {
-                        esp_println::println!("File contains invalid UTF-8 data.");
-                    }
-                }
+            let delay = Delay::new();
+            let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
+
+            match init_file_system(spi_device, delay, ExtAlloc::default()).await {
+                Ok(()) => break,
                 Err(e) => {
-                    esp_println::println!("Could not open file: {:?}", e);
-                    esp_println::println!("Check if the name is EXACTLY 'COOL_F~1.TXT'");
+                    embassy_time::Timer::after_secs(1).await;
+                    println!("error: {:?}", e);
                 }
             }
         }
-        Err(e) => {
-            esp_println::println!("Could not open volume: {:?}", e);
-            esp_println::println!("HINT: If you see SignatureNotFound, it's because of the 1.6TB sync error.");
-        }
     }
 
-    loop{}
+    let mut tick = 0;
+    
+    loop{
+        println!("tick {tick}");
+        embassy_time::Timer::after_secs(5).await;
+        tick += 1;
+    }
 }
 
 #[derive(Default)]

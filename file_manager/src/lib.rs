@@ -131,7 +131,6 @@ pub enum FManError<E: core::fmt::Debug> {
     IsDir
 }
 
-
 impl<E: core::fmt::Debug> From<alpa::db::Error<embedded_sdmmc::Error<E>>> for FManError<E> {
     fn from(e: alpa::db::Error<embedded_sdmmc::Error<E>>) -> Self {
         FManError::DbErr(e)
@@ -263,7 +262,7 @@ impl <
 
     pub async fn with_root_dir_async<F, R>(&self, f: F) -> Result<R, FManError<D::Error>>
     where
-        F: for<'a> AsyncRootFn<D, T, R>,
+        F: AsyncRootFn<D, T, R>,
     {
         let state = self.state.lock().await;
         if let CardState::Active { ref vm, ref vol } = state.card_state {

@@ -139,16 +139,23 @@ async fn main(spawner: Spawner) {
     let mut ping_manager = PingManager::new(sta_stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
     let mut tick = 0;
 
+    let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+    println!("{}", stats);
+
     {
-        let sck  = peripherals.GPIO13;
-        let mosi = peripherals.GPIO14;
         let miso = peripherals.GPIO32;
+        // GND
+        let sck  = peripherals.GPIO13;
+        // VDD
+        // GND
+        let mosi = peripherals.GPIO14;
+        // CS
 
         loop {
             let mut spi = Spi::new(
                 unsafe { peripherals.SPI2.clone_unchecked() },
                 Config::default()
-                    .with_frequency(Rate::from_mhz(1))
+                    .with_frequency(Rate::from_mhz(5))
                     .with_mode(Mode::_0),
             )
             .unwrap()
@@ -156,16 +163,16 @@ async fn main(spawner: Spawner) {
             .with_mosi(unsafe { mosi.clone_unchecked() })
             .with_miso(unsafe { miso.clone_unchecked() });
 
-            let mut sd_cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
+            let mut cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
 
-            sd_cs.set_high();
+            cs.set_high();
 
             // for _ in 0..100 {
             //     let _ = spi.write(&[0xFF]);
             // }
 
             let delay = Delay::new();
-            let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
+            let spi_device = ExclusiveDevice::new(spi, cs, delay).unwrap();
 
             match init_file_system(spi_device, delay, ExtAlloc::default()).await {
                 Ok(()) => break,

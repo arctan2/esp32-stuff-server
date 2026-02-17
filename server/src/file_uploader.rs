@@ -1,4 +1,4 @@
-use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
+use alpa::embedded_sdmmc_fs::{DbDirSdmmc, VM};
 use alpa::db::Database;
 use alpa::{Value, Row, Query, QueryExecutor};
 use embedded_sdmmc::{Mode, RawDirectory, VolumeManager, BlockDevice, TimeSource};
@@ -60,10 +60,10 @@ where
 
     fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
         async move {
-            let db_dir = vm.open_dir(root_dir, consts::DB_DIR).map_err(|_| "unable to open db dir")?;
-            let db_dir = db_dir.to_directory(vm);
+            let root_dir = root_dir.to_directory(vm);
+            let db_dir = root_dir.open_dir(consts::DB_DIR).map_err(|_| "unable to open db dir")?.to_raw_directory();
             let db_dir = DbDirSdmmc::new(db_dir);
-            let mut db = match Database::new_init(&db_dir, ExtAlloc::default()) {
+            let mut db = match Database::new_init(VM::new(vm), db_dir, ExtAlloc::default()) {
                 Ok(d) => d,
                 Err(_) => return Err("db init error".into())
             };
@@ -107,13 +107,9 @@ where
             let ext = s.next().unwrap();
 
             let actual_name = format!("{}.{}", cur_file_id, ext);
-            let files_dir = vm.open_dir(root_dir, self.file_dir_name).map_err(|_| "unable to open FILES dir")?;
-            let new_file = vm.open_file_in_dir(files_dir, str::from_utf8(actual_name.as_bytes()).unwrap(), Mode::ReadWriteCreate)
-                             .map_err(|_| "unable to create file")?
-                             .to_file(vm);
-
-            let _ = vm.close_dir(files_dir);
-            let _ = vm.close_dir(root_dir);
+            let files_dir = root_dir.open_dir(self.file_dir_name).map_err(|_| "unable to open FILES dir")?;
+            let new_file = files_dir.open_file_in_dir(str::from_utf8(actual_name.as_bytes()).unwrap(), Mode::ReadWriteCreate)
+                             .map_err(|_| "unable to create file")?;
 
             let mut reader = self.body.reader();
             let mut buffer = [0u8; 512];

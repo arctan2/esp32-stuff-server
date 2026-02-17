@@ -1777,6 +1777,7 @@ dependencies = [
  "alpa",
  "embedded-sdmmc",
  "esp-alloc",
+ "esp-println",
  "file_manager",
  "picoserve",
 ]

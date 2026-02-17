@@ -1,13 +1,11 @@
 #![allow(nonstandard_style)]
 use alpa::embedded_sdmmc_ram_device::{allocators};
 use picoserve::time::Duration;
-use picoserve::routing::{post, get};
-use picoserve::response::{Response};
+use picoserve::routing::{post, get, delete, parse_path_segment, Router, PathRouter};
+use picoserve::response::{Response, IntoResponse};
 use file_manager::{init_file_manager, DummyTimesource};
-use server::{CatchAll};
+use server::{CatchAll, HOME_PAGE};
 use file_manager::{BlkDev, init_file_system, ExtAlloc};
-
-static HOME_PAGE: &str = include_str!("./html/home.html");
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -57,14 +55,30 @@ async fn main() {
     .await
 }
 
-fn router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
-    picoserve::Router::new()
-        .route("/", get(|| async {
-            Response::ok(HOME_PAGE).with_header("Content-Type", "text/html")
-        }))
-        .route(("/fs", CatchAll), get(server::handle_fs))
-        .route("/files", get(server::handle_files))
-        .route(("/download", CatchAll), get(server::handle_download))
-        .route("/upload", post(server::handle_file_upload))
-        .route("/upload-music", post(server::handle_music_upload))
+async fn home() -> impl IntoResponse {
+    Response::ok(HOME_PAGE)
+        .with_header("Content-Type", "text/html")
 }
+
+fn files_routes() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/list", get(server::handle_files))
+        .route(("/delete", parse_path_segment::<String>()), delete(server::handle_delete_file))
+}
+
+fn upload_routes() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/file", post(server::handle_file_upload))
+        .route("/music", post(server::handle_music_upload))
+}
+
+pub fn router() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/", get(home))
+        .nest("/files", files_routes())
+        .nest("/upload", upload_routes())
+        .route("/db", delete(server::handle_delete_db))
+        .route(("/download", CatchAll), get(server::handle_download))
+        .route(("/fs", CatchAll), get(server::handle_fs))
+}
+

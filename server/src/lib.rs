@@ -4,11 +4,12 @@
 #![no_std]
 extern crate alloc;
 
+#[cfg(feature = "std-mode")]
+extern crate std;
+
 pub(crate) mod internal_prelude {
     #![allow(unused)]
     pub use alloc::string::{String, ToString};
-    pub use alloc::vec::Vec;
-    pub use alloc::boxed::Box;
     pub use core::result::Result::{self, Ok, Err};
     pub use core::option::Option::{self, Some, None};
 }
@@ -17,22 +18,30 @@ use alloc::format;
 
 pub mod file_uploader;
 
-use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
+use alpa::embedded_sdmmc_fs::{DbDirSdmmc, VM};
 use alpa::db::Database;
-use alpa::{Query, QueryExecutor};
+use alpa::{Query, QueryExecutor, Value};
 use embedded_sdmmc::{BlockDevice, RawDirectory, TimeSource, VolumeManager};
 use picoserve::routing::{PathDescription};
 use picoserve::response::{IntoResponse};
 use picoserve::request::{RequestBody, RequestParts, Path};
 use picoserve::extract::{FromRequest};
 use picoserve::io::Read;
+use picoserve::response::Response;
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
 use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager, FManError, FileType, CardState, consts, AsyncRootFn};
 
 #[cfg(feature = "embassy-mode")]
+use esp_println::println;
+#[cfg(feature = "std-mode")]
+use std::println;
+
+#[cfg(feature = "embassy-mode")]
 use file_manager::{ConcreteSpi, ConcreteDelay};
+
+pub static HOME_PAGE: &str = include_str!("./html/home.html");
 
 #[derive(Copy, Clone, Debug)]
 pub struct CatchAll;
@@ -120,10 +129,11 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for FsIterChunks<D, A> {
                                 if ext == b"TXT" {
                                     chunk_writer.write_chunk(b"<pre>").await?;
                                 }
+                                let mut buffer: Vec<u8, A> = Vec::with_capacity_in(1024, self.allocator.clone());
+                                buffer.resize(buffer.capacity(), 0);
+                                buffer.fill(0);
                                 loop {
-                                    let mut buffer = [0u8; 1024];
-                                    
-                                    match vm.read(f, &mut buffer) {
+                                    match vm.read(f, buffer.as_mut()) {
                                         Ok(count) => {
                                             chunk_writer.write_chunk(&buffer[0..count]).await?;
                                             match vm.file_eof(f) {
@@ -184,8 +194,9 @@ where
 
             match root_dir.open_dir(consts::DB_DIR) {
                 Ok(dir) => {
-                    let db_dir = DbDirSdmmc::new(dir);
-                    let mut db = match Database::new_init(&db_dir, allocator.clone()) {
+                    let db_dir = DbDirSdmmc::new(dir.to_raw_directory());
+                    let vm = VM::new(vm);
+                    let mut db = match Database::new_init(vm, db_dir, allocator.clone()) {
                         Ok(d) => d,
                         Err(e) => {
                             if let Err(e) = self.chunk_writer.write_chunk(format!("error: {:?}", e).as_bytes()).await {
@@ -304,9 +315,11 @@ impl <D: BlockDevice, A: Allocator + Clone> Chunks for DownloadIterChunks<D, A> 
                     FileType::File(_, f) => {
                         let state = self.fman.state.lock().await;
                         if let CardState::Active{ ref vm, vol: _ } = state.card_state {
+                            let mut buffer: Vec<u8, A> = Vec::with_capacity_in(1024, self.allocator.clone());
+                            buffer.resize(buffer.capacity(), 0);
+                            buffer.fill(0);
                             loop {
-                                let mut buffer = [0u8; 4096];
-                                match vm.read(f, &mut buffer) {
+                                match vm.read(f, buffer.as_mut()) {
                                     Ok(count) => {
                                         chunk_writer.write_chunk(&buffer[0..count]).await?;
                                         match vm.file_eof(f) {
@@ -431,4 +444,90 @@ pub async fn handle_download(path: String) -> impl IntoResponse {
             file, fman, allocator: ExtAlloc::default()
         })
     }
+}
+
+
+struct DeleteFileAsync {
+    name: String
+}
+
+impl<D, T> AsyncRootFn<D, T, &'static str> for DeleteFileAsync
+where 
+    D: BlockDevice,
+    T: TimeSource,
+{
+    type Fut<'a> = impl core::future::Future<Output = Result<&'static str, FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
+
+    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+        async move {
+            let root_dir = root_dir.to_directory(vm);
+            let allocator = ExtAlloc::default();
+            let db_dir = root_dir.open_dir(consts::DB_DIR).map_err(FManError::SdErr)?.to_raw_directory();
+            let files_dir = root_dir.open_dir(consts::FILES_DIR).map_err(FManError::SdErr)?;
+
+            let vm = VM::new(vm);
+            let mut db = Database::new_init(vm, DbDirSdmmc::new(db_dir), allocator.clone()).map_err(FManError::DbErr)?;
+        
+            let files_table = db.get_table("files", allocator.clone()).map_err(FManError::DbErr)?;
+
+            match files_dir.delete_file_in_dir(self.name.as_str()) {
+                Err(embedded_sdmmc::Error::NotFound) => (),
+                Err(e) => return Err(FManError::SdErr(e)),
+                Ok(()) => ()
+            }
+
+            db.delete_from_table(files_table, Value::Chars(self.name.as_bytes()), allocator.clone()).map_err(FManError::DbErr)?;
+
+            Ok("success")
+        }
+    }
+}
+
+pub async fn handle_delete_file(name: String) -> impl IntoResponse {
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
+    let fman = get_file_manager();
+
+    let r = DeleteFileAsync { name };
+    fman.with_root_dir_async(r).await.map_err(|e| picoserve::response::DebugValue(e))
+}
+
+struct DeleteDbAsync;
+
+impl<D, T> AsyncRootFn<D, T, &'static str> for DeleteDbAsync
+where 
+    D: BlockDevice,
+    T: TimeSource,
+{
+    type Fut<'a> = impl core::future::Future<Output = Result<&'static str, FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
+
+    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+        async move {
+            let root_dir = root_dir.to_directory(vm);
+            let db_dir = root_dir.open_dir(consts::DB_DIR).map_err(FManError::SdErr)?;
+            match db_dir.delete_file_in_dir(alpa::WAL_FILE_NAME) {
+                Err(embedded_sdmmc::Error::NotFound) => (),
+                Err(e) => return Err(FManError::SdErr(e)),
+                Ok(()) => ()
+            }
+
+            match db_dir.delete_file_in_dir(alpa::DB_FILE_NAME) {
+                Err(embedded_sdmmc::Error::NotFound) => (),
+                Err(e) => return Err(FManError::SdErr(e)),
+                Ok(()) => ()
+            }
+
+            Ok("success")
+        }
+    }
+}
+
+pub async fn handle_delete_db() -> impl IntoResponse {
+    #[cfg(feature = "embassy-mode")]
+    let fman = get_file_manager().await;
+    #[cfg(feature = "std-mode")]
+    let fman = get_file_manager();
+
+    fman.with_root_dir_async(DeleteDbAsync).await.map_err(|e| picoserve::response::DebugValue(e))
 }

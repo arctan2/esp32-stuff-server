@@ -1,3 +1,4 @@
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
 *{
 	margin: 0;
@@ -37,10 +38,36 @@ a{
 <script>
 const aTags = document.querySelectorAll("a");
 
+async function deleteFile(name) {
+	const response = await fetch(`/files/delete/${name}`, {
+		method: 'DELETE',
+	});
+
+	const data = await response.text();
+
+	if(data === "success") {
+		alert("deleted successfully!");
+	} else {
+		alert(`error: ${data}`);
+	}
+	window.location.reload();
+}
+
 for(const a of aTags) {
-	let [actual_name, name] = a.innerText.split(";");
+	let parent = a.parentElement;
+	let deleteBtn = document.createElement("button");
+	let [actualName, name] = a.innerText.split(";");
 	let origin = window.location.origin;
-	a.href = `${origin}/fs/files/${actual_name}`;
+
+	deleteBtn.style.marginLeft = "1rem";
+	deleteBtn.innerText = "delete";
+	deleteBtn.addEventListener("click", () => {
+		deleteBtn.disabled = true;
+		deleteFile(actualName);
+	});
+	parent.appendChild(deleteBtn);
+
+	a.href = `${origin}/fs/files/${actualName}`;
 	a.innerText = name;
 	a.style.color = "#fff";
 }
@@ -66,7 +93,7 @@ async function uploadFile(btn) {
 		const formData = new FormData();
 		formData.append('file', file);
 
-		const response = await fetch(`/upload?ext=${extension}`, {
+		const response = await fetch(`/upload/file?ext=${extension}`, {
 			method: 'POST',
 			body: formData,
 		});

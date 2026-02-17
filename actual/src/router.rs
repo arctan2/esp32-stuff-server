@@ -1,14 +1,14 @@
-use picoserve::routing::{post, get};
+use picoserve::routing::{post, get, delete, parse_path_segment, PathRouter, Router};
 use picoserve::response::{IntoResponse, Response};
 use picoserve::extract::{Json};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use crate::event_handler::{Event, EVENT_CHAN};
 use crate::types::{WifiSsidPwd, WifiStatus};
-use server::CatchAll;
+use server::{CatchAll, HOME_PAGE};
+use crate::types::String;
 
 static CONFIG_PAGE: &str = include_str!("./html/config.html");
-static HOME_PAGE: &str = include_str!("./html/home.html");
 static STATUS_SIGNAL: Signal<CriticalSectionRawMutex, WifiStatus> = Signal::new();
 static FLASH_DATA_SIGNAL: Signal<CriticalSectionRawMutex, WifiSsidPwd> = Signal::new();
 
@@ -52,26 +52,53 @@ async fn get_flash_data() -> impl IntoResponse {
     picoserve::response::json::Json(data)
 }
 
-pub fn router() -> picoserve::Router<impl picoserve::routing::PathRouter> {
-    picoserve::Router::new()
-        .route("/", get(|| async {
-            Response::ok(HOME_PAGE).with_header("Content-Type", "text/html")
-        }))
-        .route("/config", get(|| async {
-            Response::ok(CONFIG_PAGE).with_header("Content-Type", "text/html")
-        }))
+async fn print_alloc() -> impl IntoResponse {
+    STATUS_SIGNAL.reset();
+    EVENT_CHAN.send(Event::GetStatus(&STATUS_SIGNAL)).await;
+    let status = STATUS_SIGNAL.wait().await;
+    let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+    esp_println::println!("{}", stats);
+    picoserve::response::json::Json(status)
+}
+
+async fn home() -> impl IntoResponse {
+    Response::ok(HOME_PAGE)
+        .with_header("Content-Type", "text/html")
+}
+
+async fn config() -> impl IntoResponse {
+    Response::ok(CONFIG_PAGE).with_header("Content-Type", "text/html")
+}
+
+fn files_routes() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/list", get(server::handle_files))
+        .route(("/delete", parse_path_segment::<String>()), delete(server::handle_delete_file))
+}
+
+fn upload_routes() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/file", post(server::handle_file_upload))
+        .route("/music", post(server::handle_music_upload))
+}
+
+pub fn router() -> Router<impl PathRouter> {
+    Router::new()
+        .route("/", get(home))
+        .route("/config", get(config))
         .route("/set-config", post(set_config))
         .route("/write-to-flash", post(write_to_flash))
-        .route("/connect", get(connect))
-        .route("/disconnect", get(disconnect))
+        // .route("/connect", get(connect))
+        // .route("/disconnect", get(disconnect))
         .route("/status", get(status))
-        .route("/software-reset", get(software_reset))
+        // .route("/software-reset", get(software_reset))
         .route("/get-flash-data", get(get_flash_data))
+        .route("/print-alloc", get(print_alloc))
 
-        .route(("/fs", CatchAll), get(server::handle_fs))
-        .route("/files", get(server::handle_files))
         .route(("/download", CatchAll), get(server::handle_download))
-        .route("/upload", post(server::handle_file_upload))
-        .route("/upload-music", post(server::handle_music_upload))
+        .route(("/fs", CatchAll), get(server::handle_fs))
+        .route("/db", delete(server::handle_delete_db))
+        .nest("/files", files_routes())
+        .nest("/upload", upload_routes())
 }
 

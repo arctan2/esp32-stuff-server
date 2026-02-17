@@ -1,4 +1,14 @@
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <head><title>station</title></head>
 <body>
 	<h1>arctan2's station</h1>
+	<button onclick="deleteDb()">Delete DB</button>
 </body>
+
+<script>
+async function deleteDb() {
+	let res = await fetch("/db", { method: "DELETE" });
+	let data = await res.text();
+	alert(data);
+}
+</script>

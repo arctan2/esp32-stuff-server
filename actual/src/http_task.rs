@@ -4,6 +4,7 @@ use embassy_net::Stack;
 use embassy_time::Duration;
 use embassy_net::tcp::TcpSocket;
 use crate::router;
+use allocator_api2::boxed::Box;
 
 #[embassy_executor::task(pool_size = 2)]
 pub async fn http_server_task(
@@ -11,7 +12,7 @@ pub async fn http_server_task(
     static_resources: &'static StaticCell<([u8; 1024], [u8; 1024], [u8; 2048])>
 ) {
     let (rx_buf, tx_buf, http_buf) = static_resources.init(([0; 1024], [0; 1024], [0; 2048]));
-    let app = router::router();
+    let app = Box::new_in(router::router(), esp_alloc::ExternalMemory);
     let config = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: Some(Duration::from_secs(5)),
         persistent_start_read_request: None,

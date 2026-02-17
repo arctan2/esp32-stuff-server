@@ -5,6 +5,7 @@ use alpa::embedded_sdmmc_ram_device::esp_alloc::ExternalMemory;
 pub use alpa::embedded_sdmmc_ram_device::{
     allocators,
 };
+use alpa::embedded_sdmmc_fs::VM;
 pub use alpa::embedded_sdmmc_ram_device::block_device::{FsBlockDeviceError, FsBlockDevice};
 pub use std::sync::OnceLock;
 
@@ -96,8 +97,9 @@ where
 
         {
             let db_dir = root_dir.open_dir(consts::DB_DIR)?;
+            let db_dir = db_dir.to_raw_directory();
             let stuff_dir = DbDirSdmmc::new(db_dir);
-            let mut db = Database::new_init(&stuff_dir, allocator.clone())?;
+            let mut db = Database::new_init(VM::new(vm), stuff_dir, allocator.clone())?;
 
             {
                 let name = Column::new("name", ColumnType::Chars).primary();
