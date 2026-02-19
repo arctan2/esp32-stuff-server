@@ -1,12 +1,23 @@
+#![allow(unused)]
 use alpa::embedded_sdmmc_fs::{DbDirSdmmc, VM};
 use alpa::db::Database;
 use alpa::{Value, Row, Query, QueryExecutor};
 use embedded_sdmmc::{Mode, RawDirectory, VolumeManager, BlockDevice, TimeSource};
 use picoserve::request::{RequestBody, RequestParts};
 use picoserve::io::Read;
-use file_manager::{get_file_manager, ExtAlloc, AsyncRootFn, FManError};
+use file_manager::{get_file_manager, ExtAlloc, AsyncRootFn, FManError, DummyTimesource, BlkDev, FsBlockDevice};
 use crate::consts;
 use alloc::format;
+use crate::chunks;
+use allocator_api2::boxed::Box;
+use allocator_api2::vec::Vec;
+#[cfg(feature = "std-mode")]
+use std::println;
+
+#[cfg(feature = "std-mode")]
+pub use tokio::select;
+#[cfg(feature = "embassy-mode")]
+pub use embassy_futures::select;
 
 enum Step {
     FindFilename,
@@ -50,15 +61,11 @@ struct FileUploaderAsync<'r, R: Read> {
     table_and_count_tracker_name: &'static str
 }
 
-impl<'r, R, D, T> AsyncRootFn<D, T, ()> for FileUploaderAsync<'r, R>
-where 
-    D: BlockDevice,
-    T: TimeSource,
-    R: Read
-{
-    type Fut<'a> = impl core::future::Future<Output = Result<(), FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
+impl<'r, R> AsyncRootFn<()> for FileUploaderAsync<'r, R>
+where R: Read {
+    type Fut<'a> = impl core::future::Future<Output = Result<(), FManError<<FsBlockDevice as BlockDevice>::Error>>> + 'a where Self: 'a;
 
-    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) -> Self::Fut<'a> {
         async move {
             let root_dir = root_dir.to_directory(vm);
             let db_dir = root_dir.open_dir(consts::DB_DIR).map_err(|_| "unable to open db dir")?.to_raw_directory();
@@ -107,144 +114,171 @@ where
             let ext = s.next().unwrap();
 
             let actual_name = format!("{}.{}", cur_file_id, ext);
-            let files_dir = root_dir.open_dir(self.file_dir_name).map_err(|_| "unable to open FILES dir")?;
-            let new_file = files_dir.open_file_in_dir(str::from_utf8(actual_name.as_bytes()).unwrap(), Mode::ReadWriteCreate)
-                             .map_err(|_| "unable to create file")?;
+            let files_dir = root_dir.open_dir(self.file_dir_name).map_err(|_| "unable to open FILES dir")?.to_raw_directory();
 
             let mut reader = self.body.reader();
-            let mut buffer = [0u8; 512];
-            let mut filename = [0u8; 128];
-            let mut filename_len = 0;
-
-            let mut step = Step::FindFilename;
-            let mut pattern_idx = 0;
 
             let boundary_key = "boundary=";
             let content_type = self.parts.headers().get("Content-Type").ok_or("Content-Type not found")?;
             let boundary_start = content_type.as_str().unwrap().find(boundary_key).ok_or("boundary not found")?;
             let boundary = &content_type.as_raw()[boundary_start + boundary_key.len()..];
-            let mut lookback_buf = [0u8; 128];
-            let mut lookback_len = 0;
-            let mut file_size: i64 = 0;
+            let mut boundary_vec = Vec::with_capacity_in(boundary.len(), ExtAlloc::default());
+            boundary_vec.extend_from_slice(boundary);
+            let boundary = boundary_vec;
 
-            'stream: while let Ok(n) = reader.read(&mut buffer).await {
-                if n == 0 { break; }
+            let rsender = chunks::get_ready_sender();
+            let mut free_chan = chunks::get_free_chan();
 
-                for (i, &byte) in buffer[..n].iter().enumerate() {
-                    match step {
-                        Step::FindFilename => {
-                            let file_pat = b"filename=\"";
-                            if byte == file_pat[pattern_idx] {
-                                pattern_idx += 1;
-                                if pattern_idx == file_pat.len() {
-                                    step = Step::ReadFilename;
-                                    pattern_idx = 0;
-                                }
-                            } else {
-                                pattern_idx = 0;
+            chunks::send_event_sig(
+                chunks::UploadEvent::Begin(
+                    files_dir,
+                    actual_name,
+                    unsafe { chunks::DangerousVMPtr(vm as *const VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) },
+                    boundary,
+                )
+            ).await;
+
+            loop {
+                select!(
+                    err = chunks::get_ret_sig().wait() => {
+                        return match err {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(e.into())
+                        };
+                    },
+                    mut chunk = free_chan.recv() => {
+                        if let Ok(n) = reader.read(&mut chunk.buf).await {
+                            if chunk.len == 0 {
+                                break;
                             }
+                            chunk.len = n;
+                            rsender.send(chunk).await;
+                        } else {
+                            chunks::send_event_sig(chunks::UploadEvent::ReadErr).await;
+                            return Err("read error".into());
                         }
-
-                        Step::ReadFilename => {
-                            if byte == '"' as u8 {
-                                step = Step::FindDataStart;
-                                pattern_idx = 0;
-                            } else {
-                                filename[filename_len] = byte;
-                                filename_len += 1;
-                            }
-                        }
-
-                        Step::FindDataStart => {
-                            let header_sep = b"\r\n\r\n";
-                            if byte == header_sep[pattern_idx] {
-                                pattern_idx += 1;
-                                if pattern_idx == header_sep.len() {
-                                    step = Step::StreamingBody;
-                                }
-                            } else {
-                                pattern_idx = 0;
-                            }
-                        }
-
-                        Step::StreamingBody => {
-                            let data_chunk = &buffer[i..n];
-
-                            if let Some(pos) = find_boundary_across_buffers(&lookback_buf[..lookback_len], data_chunk, boundary) {
-                                match pos {
-                                    (1, idx) => {
-                                        let end = idx.saturating_sub(4);
-                                        let buf = &lookback_buf[0..end];
-                                        new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                        file_size += buf.len() as i64;
-                                    },
-                                    (2, idx) => {
-                                        if idx >= 4 {
-                                            let buf = &lookback_buf[..lookback_len];
-                                            new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                            file_size += buf.len() as i64;
-
-                                            let buf = &data_chunk[0..idx-4];
-                                            new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                            file_size += buf.len() as i64;
-                                        } else {
-                                            let lookback_trim = 4 - idx;
-                                            let end = lookback_len.saturating_sub(lookback_trim);
-                                            let buf = &lookback_buf[..end];
-                                            new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                            file_size += buf.len() as i64;
-                                        }
-                                    },
-                                    _ => unreachable!()
-                                }
-                                break 'stream;
-                            } else {
-                                let buf = &lookback_buf[..lookback_len];
-                                new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                file_size += buf.len() as i64;
-
-                                if data_chunk.len() >= lookback_buf.len() {
-                                    let safe_len = data_chunk.len() - lookback_buf.len();
-                                    let buf = &data_chunk[..safe_len];
-                                    new_file.write(buf).map_err(|_| "unable to write to new_file")?;
-                                    file_size += buf.len() as i64;
-
-                                    let tail = &data_chunk[safe_len..];
-                                    lookback_buf[..tail.len()].copy_from_slice(tail);
-                                    lookback_len = tail.len();
-                                } else {
-                                    let move_amt = data_chunk.len();
-                                    lookback_buf.copy_within(move_amt.., 0);
-
-                                    let start = lookback_buf.len() - move_amt;
-                                    lookback_buf[start..].copy_from_slice(data_chunk);
-                                    lookback_len = lookback_buf.len();
-                                }
-                            }
-                            continue 'stream;
-                        }
-                    }
-                }
+                    },
+                );
             }
 
-            new_file.flush().map_err(|_| "unable to flush new_file")?;
-            new_file.close().map_err(|_| "unable to close new_file")?;
+            // 'stream: while let Ok(n) = reader.read(buffer.as_mut()).await {
+            //     if n == 0 { break; }
 
-            {
-                let mut row = Row::new_in(ExtAlloc::default());
-                row.push(Value::Chars(actual_name.as_bytes()));
-                row.push(Value::Chars(&filename[..filename_len]));
-                row.push(Value::Int(file_size));
-                db.insert_to_table(files_table, row, ExtAlloc::default()).map_err(|_| "unable to insert to table")?;
-            }
+            //     for (i, &byte) in buffer[..n].iter().enumerate() {
+            //         match step {
+            //             Step::FindFilename => {
+            //                 let file_pat = b"filename=\"";
+            //                 if byte == file_pat[pattern_idx] {
+            //                     pattern_idx += 1;
+            //                     if pattern_idx == file_pat.len() {
+            //                         step = Step::ReadFilename;
+            //                         pattern_idx = 0;
+            //                     }
+            //                 } else {
+            //                     pattern_idx = 0;
+            //                 }
+            //             }
 
-            {
-                let mut row = Row::new_in(ExtAlloc::default());
-                row.push(Value::Chars(self.table_and_count_tracker_name.as_bytes()));
-                row.push(Value::Int(cur_file_id + 1));
-                db.update_row(count_tracker_table, Value::Chars(self.table_and_count_tracker_name.as_bytes()), row, ExtAlloc::default())
-                    .map_err(|_| "unable to update count_tracker_table to table")?;
-            }
+            //             Step::ReadFilename => {
+            //                 if byte == '"' as u8 {
+            //                     step = Step::FindDataStart;
+            //                     pattern_idx = 0;
+            //                 } else {
+            //                     filename[filename_len] = byte;
+            //                     filename_len += 1;
+            //                 }
+            //             }
+
+            //             Step::FindDataStart => {
+            //                 let header_sep = b"\r\n\r\n";
+            //                 if byte == header_sep[pattern_idx] {
+            //                     pattern_idx += 1;
+            //                     if pattern_idx == header_sep.len() {
+            //                         step = Step::StreamingBody;
+            //                     }
+            //                 } else {
+            //                     pattern_idx = 0;
+            //                 }
+            //             }
+
+            //             Step::StreamingBody => {
+            //                 let data_chunk = &buffer[i..n];
+
+            //                 if let Some(pos) = find_boundary_across_buffers(&lookback_buf[..lookback_len], data_chunk, &boundary) {
+            //                     match pos {
+            //                         (1, idx) => {
+            //                             let end = idx.saturating_sub(4);
+            //                             let buf = &lookback_buf[0..end];
+            //                             new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                             file_size += buf.len() as i64;
+            //                         },
+            //                         (2, idx) => {
+            //                             if idx >= 4 {
+            //                                 let buf = &lookback_buf[..lookback_len];
+            //                                 new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                                 file_size += buf.len() as i64;
+
+            //                                 let buf = &data_chunk[0..idx-4];
+            //                                 new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                                 file_size += buf.len() as i64;
+            //                             } else {
+            //                                 let lookback_trim = 4 - idx;
+            //                                 let end = lookback_len.saturating_sub(lookback_trim);
+            //                                 let buf = &lookback_buf[..end];
+            //                                 new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                                 file_size += buf.len() as i64;
+            //                             }
+            //                         },
+            //                         _ => unreachable!()
+            //                     }
+            //                     break 'stream;
+            //                 } else {
+            //                     let buf = &lookback_buf[..lookback_len];
+            //                     new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                     file_size += buf.len() as i64;
+
+            //                     if data_chunk.len() >= lookback_buf.len() {
+            //                         let safe_len = data_chunk.len() - lookback_buf.len();
+            //                         let buf = &data_chunk[..safe_len];
+            //                         new_file.write(buf).map_err(|_| "unable to write to new_file")?;
+            //                         file_size += buf.len() as i64;
+
+            //                         let tail = &data_chunk[safe_len..];
+            //                         lookback_buf[..tail.len()].copy_from_slice(tail);
+            //                         lookback_len = tail.len();
+            //                     } else {
+            //                         let move_amt = data_chunk.len();
+            //                         lookback_buf.copy_within(move_amt.., 0);
+
+            //                         let start = lookback_buf.len() - move_amt;
+            //                         lookback_buf[start..].copy_from_slice(data_chunk);
+            //                         lookback_len = lookback_buf.len();
+            //                     }
+            //                 }
+            //                 continue 'stream;
+            //             }
+            //         }
+            //     }
+            // }
+
+            // new_file.flush().map_err(|_| "unable to flush new_file")?;
+            // new_file.close().map_err(|_| "unable to close new_file")?;
+
+            // {
+            //     let mut row = Row::new_in(ExtAlloc::default());
+            //     row.push(Value::Chars(actual_name.as_bytes()));
+            //     row.push(Value::Chars(&filename[..filename_len]));
+            //     row.push(Value::Int(file_size));
+            //     db.insert_to_table(files_table, row, ExtAlloc::default()).map_err(|_| "unable to insert to table")?;
+            // }
+
+            // {
+            //     let mut row = Row::new_in(ExtAlloc::default());
+            //     row.push(Value::Chars(self.table_and_count_tracker_name.as_bytes()));
+            //     row.push(Value::Int(cur_file_id + 1));
+            //     db.update_row(count_tracker_table, Value::Chars(self.table_and_count_tracker_name.as_bytes()), row, ExtAlloc::default())
+            //         .map_err(|_| "unable to update count_tracker_table to table")?;
+            // }
 
             Ok(())
         }

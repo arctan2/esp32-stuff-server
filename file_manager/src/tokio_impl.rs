@@ -37,7 +37,7 @@ unsafe impl Allocator for EspAlloc {
 
 pub type BlkDev = FsBlockDevice;
 pub type ExtAlloc = EspAlloc;
-pub type FMan = FileManager<BlkDev, TimeSrc, 4, 4, 1>;
+pub type FMan = FileManager;
 pub type FsError = FsBlockDeviceError;
 
 #[derive(Debug)]
@@ -90,7 +90,7 @@ where
 {
     let fman = get_file_manager();
     fman.with_vol_man(|vm, vol| -> Result<(), FManError<FsBlockDeviceError>> {
-        let root_dir = FileManager::<FsBlockDevice, DummyTimesource, 4, 4, 1>::root_dir(vm, vol)?.to_directory(vm);
+        let root_dir = FileManager::root_dir(vm, vol)?.to_directory(vm);
         let _ = root_dir.make_dir_in_dir(consts::DB_DIR);
         let _ = root_dir.make_dir_in_dir(consts::FILES_DIR);
         let _ = root_dir.make_dir_in_dir(consts::MUSIC_DIR);

@@ -1,21 +1,26 @@
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
 
-extern crate alloc;
 mod types;
+mod sta_config;
+mod http_task;
+mod event_handler;
+mod router;
+mod dhcp;
 
 use esp_backtrace as _;
-use esp_alloc as _;
-use embedded_sdmmc::{SdCard, TimeSource, Timestamp};
-use embedded_hal::delay::DelayNs;
-use embedded_hal::spi::SpiBus;
-use embedded_sdmmc::{VolumeManager};
-use esp_rtos::main;
-
 use types::{String};
 use esp_println::{println};
+use esp_rtos::main;
 use embassy_executor::Spawner;
+use static_cell::StaticCell;
+use esp_radio::wifi;
+use embassy_net::{StackResources, Ipv4Address, Ipv4Cidr, StaticConfigV4};
+use embassy_sync::mutex::Mutex;
+use sta_config::{StaConfigManager, CONFIG_MANAGER};
+use event_handler::{Event, EVENT_CHAN};
+use embassy_net::icmp::ping::{PingManager, PingParams};
+use embassy_net::icmp::PacketMetadata;
 use file_manager::{ExtAlloc, init_file_system};
 use esp_hal::{
     gpio::{Level, Output, OutputConfig},
@@ -27,91 +32,138 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-fn disable_sim800L_modem(gpio4: esp_hal::peripherals::GPIO4, gpio23: esp_hal::peripherals::GPIO23) {
-    let mut modem_pwr = esp_hal::gpio::Output::new(
-        gpio4, 
-        esp_hal::gpio::Level::Low, 
-        esp_hal::gpio::OutputConfig::default()
-    );
-
-    let mut modem_key = esp_hal::gpio::Output::new(
-        gpio23, 
-        esp_hal::gpio::Level::Low, 
-        esp_hal::gpio::OutputConfig::default()
-    );
-
-    modem_pwr.set_low(); 
-    modem_key.set_low();
-
-    esp_hal::delay::Delay::new().delay_ms(500u32);
-}
-
 #[main]
 async fn main(spawner: Spawner) {
     esp_println::logger::init_logger_from_env();
 
-    let config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
+    let config = esp_hal::Config::default().with_psram(esp_hal::psram::PsramConfig::default());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
+    let software_interrupt = esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+
     esp_rtos::start(timg0.timer0);
+    esp_rtos::start_second_core(
+        software_interrupt.software_interrupt0,
+        software_interrupt.software_interrupt1,
+        || {
+            println!("yo second core")
+        },
+    );
 
-    disable_sim800L_modem(peripherals.GPIO4, peripherals.GPIO23);
+    let config_mgr = StaConfigManager::new(peripherals.FLASH);
+    let config_bus = CONFIG_MANAGER.init(Mutex::new(config_mgr));
 
-    // let sck  = peripherals.GPIO13; 
-    // let mosi = peripherals.GPIO14;
-    // let miso = peripherals.GPIO32;
+    static RADIO_CTRL: StaticCell<esp_radio::Controller> = StaticCell::new();
+    let esp_radio_controller = RADIO_CTRL.init(esp_radio::init().unwrap());
 
-    // let mut spi = esp_hal::spi::master::Spi::new(
-    //     peripherals.SPI2,
-    //     esp_hal::spi::master::Config::default()
-    //         .with_frequency(esp_hal::time::Rate::from_mhz(1))
-    //         .with_mode(esp_hal::spi::Mode::_0),
-    // )
-    // .unwrap()
-    // .with_sck(sck)
-    // .with_mosi(mosi)
-    // .with_miso(miso);
+    let (mut wifi_controller, ifaces) = wifi::new(
+        esp_radio_controller,
+        peripherals.WIFI,
+        wifi::Config::default()
+    ).unwrap();
 
-    // let mut sd_cs = Output::new(peripherals.GPIO33, Level::High, OutputConfig::default());
+    let ap_config = wifi::AccessPointConfig::default()
+        .with_auth_method(wifi::AuthMethod::Wpa2Personal)
+        .with_channel(6)
+        .with_ssid(String::from("arctan2-ap"))
+        .with_password(String::from("123498765"));
 
-    // sd_cs.set_high();
+    let mut sta_config = wifi::ClientConfig::default();
+     
+    {
+        let mut manager = config_bus.lock().await;
+        if let Some(data) = manager.load() {
+            println!("wifi_details on flash = {} {}", &data.ssid, &data.pwd);
+            sta_config = sta_config.with_ssid(data.ssid).with_password(data.pwd);
+            // EVENT_CHAN.send(Event::SetConfig(data)).await;
+            EVENT_CHAN.send(Event::Connect).await;
+        } else {
+            println!("no wifi_details found!");
+        }
+    }
 
-    // for _ in 0..100 {
-    //     let _ = spi.write(&[0xFF]);
-    // }
+    static AP_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
+    static STA_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 
-    // let mut delay = esp_hal::delay::Delay::new();
-    // let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
-    // let sdcard = SdCard::new(spi_device, delay);
+    let ap_net_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 1, 1), 24),
+        gateway: Some(Ipv4Address::new(10, 0, 1, 1)),
+        dns_servers: heapless::Vec::new(),
+    });
 
-    // loop {
-    //     match sdcard.num_bytes() {
-    //         Ok(size) => {
-    //             let size_gb = size as f64 / 1024.0 / 1024.0 / 1024.0;
-    //             esp_println::println!("Card size: {} bytes ({:.2} GB)", size, size_gb);
-    //             break;
-    //         }
-    //         Err(e) => esp_println::println!("Error getting size: {:?}", e),
-    //     }
-    //     esp_hal::delay::Delay::new().delay_ms(1000u32);
-    // }
+    let sta_net_config = embassy_net::Config::dhcpv4(Default::default());
 
-    // let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource::default());
+    let (ap_stack, ap_runner) = embassy_net::new(
+        ifaces.ap,
+        ap_net_config,
+        AP_RESOURCES.init(StackResources::new()),
+        1234,
+    );
+
+    let (sta_stack, sta_runner) = embassy_net::new(
+        ifaces.sta,
+        sta_net_config,
+        STA_RESOURCES.init(StackResources::new()),
+        5678,
+    );
+
+    if let Err(e) = wifi_controller.set_power_saving(wifi::PowerSaveMode::None) {
+        println!("error while setting power saving: {}", e);
+    }
+    wifi_controller.set_config(&wifi::ModeConfig::ApSta(sta_config, ap_config.clone())).unwrap();
+    wifi_controller.start_async().await.unwrap();
+    println!("wifi started...");
+
+    spawner.spawn(net_runner_task(ap_runner)).unwrap();
+    println!("ap_runner spawned...");
+    spawner.spawn(net_runner_task(sta_runner)).unwrap();
+    println!("sta_runner spawned...");
+
+    spawner.spawn(event_handler::event_handler_task(wifi_controller, ap_config, config_bus, sta_stack)).unwrap();
+    println!("wifi logger started...");
+
+    spawner.spawn(dhcp::dhcp_server_task(ap_stack)).unwrap();
+    println!("dhcp_server_task spawned...");
+
+    static AP_SOCKET_RESOURCES: StaticCell<([u8; 1024], [u8; 1024], [u8; 2048])> = StaticCell::new();
+    static STA_SOCKET_RESOURCES: StaticCell<([u8; 1024], [u8; 1024], [u8; 2048])> = StaticCell::new();
+
+    spawner.spawn(http_task::http_server_task(ap_stack, &AP_SOCKET_RESOURCES)).unwrap();
+    println!("ap_http_server_task spawned...");
+
+    spawner.spawn(http_task::http_server_task(sta_stack, &STA_SOCKET_RESOURCES)).unwrap();
+    println!("sta_http_server_task spawned...");
+
+    println!("Everything init successfully...");
+
+    let mut rx_buf = [0; 64];
+    let mut tx_buf = [0; 64];
+    let mut rx_meta = [PacketMetadata::EMPTY];
+    let mut tx_meta = [PacketMetadata::EMPTY];
+    let mut ping_manager = PingManager::new(sta_stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
+    let mut tick = 0;
+
+    let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+    println!("{}", stats);
 
     {
-        let sck  = peripherals.GPIO13;
-        let mosi = peripherals.GPIO14;
         let miso = peripherals.GPIO32;
+        // GND
+        let sck  = peripherals.GPIO13;
+        // VDD
+        // GND
+        let mosi = peripherals.GPIO14;
+        // CS
 
         loop {
             let mut spi = Spi::new(
                 unsafe { peripherals.SPI2.clone_unchecked() },
                 Config::default()
-                    .with_frequency(Rate::from_mhz(1))
+                    .with_frequency(Rate::from_mhz(5))
                     .with_mode(Mode::_0),
             )
             .unwrap()
@@ -119,12 +171,16 @@ async fn main(spawner: Spawner) {
             .with_mosi(unsafe { mosi.clone_unchecked() })
             .with_miso(unsafe { miso.clone_unchecked() });
 
-            let mut sd_cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
+            let mut cs = Output::new(unsafe { peripherals.GPIO33.clone_unchecked() }, Level::High, OutputConfig::default());
 
-            sd_cs.set_high();
+            cs.set_high();
+
+            // for _ in 0..100 {
+            //     let _ = spi.write(&[0xFF]);
+            // }
 
             let delay = Delay::new();
-            let spi_device = ExclusiveDevice::new(spi, sd_cs, delay).unwrap();
+            let spi_device = ExclusiveDevice::new(spi, cs, delay).unwrap();
 
             match init_file_system(spi_device, delay, ExtAlloc::default()).await {
                 Ok(()) => break,
@@ -136,27 +192,32 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    let mut tick = 0;
-    
-    loop{
+
+    loop {
         println!("tick {tick}");
-        embassy_time::Timer::after_secs(5).await;
+        if let Some(config) = sta_stack.config_v4() {
+            match config.gateway {
+                Some(gateway) => {
+                    let mut ping_params = PingParams::new(gateway);
+                    ping_params.set_payload(b"Hello, router!");
+                    match ping_manager.ping(&ping_params).await {
+                        Ok(time) => println!("Ping time of {}: {}ms", gateway, time.as_millis()),
+                        Err(ping_error) => println!("PingError: {:?}", ping_error),
+                    };
+                },
+                None => println!("Gateway not found.")
+            }
+        } else {
+            println!("STA Link is down or waiting for IP...");
+        }
+        embassy_time::Timer::after_secs(10).await;
         tick += 1;
     }
 }
 
-#[derive(Default)]
-pub struct DummyTimesource();
 
-impl TimeSource for DummyTimesource {
-    fn get_timestamp(&self) -> Timestamp {
-        Timestamp {
-            year_since_1970: 0,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-        }
-    }
+#[embassy_executor::task(pool_size = 2)]
+async fn net_runner_task(mut runner: embassy_net::Runner<'static, wifi::WifiDevice<'static>>) {
+    runner.run().await;
 }
+

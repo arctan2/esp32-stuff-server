@@ -1,29 +1,63 @@
 #![allow(unused)]
 use core::ops::{Deref, DerefMut};
-use tokio::sync::{mpsc, Notify, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
+use tokio::sync::{Notify, Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
+use tokio::sync::mpsc::{Sender as TokioSender, Receiver as TokioReceiver};
 use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct Channel<T, const N: usize> {
-    tx: mpsc::Sender<T>,
-    rx: tokio::sync::Mutex<mpsc::Receiver<T>>,
+    tx: TokioSender<T>,
+    rx: TokioMutex<TokioReceiver<T>>,
+}
+
+#[derive(Debug)]
+pub struct Sender<T, const N: usize> {
+    s: TokioSender<T>,
+}
+
+impl <T, const N: usize> Clone for Sender<T, N> {
+    fn clone(&self) -> Self {
+        Self { s: self.s.clone() }
+    }
+}
+
+impl<T, const N: usize> Sender<T, N> {
+    pub async fn send(&self, msg: T) {
+        self.s.send(msg).await.unwrap();
+    }
+}
+
+#[derive(Debug)]
+pub struct Receiver<T, const N: usize> {
+    s: TokioMutex<TokioReceiver<T>>
+}
+
+impl<T, const N: usize> Receiver<T, N> {
+    pub async fn recv(&self) -> T {
+        self.s.lock().await.recv().await.unwrap()
+    }
 }
 
 impl<T, const N: usize> Channel<T, N> {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(N);
-        Self {
-            tx,
-            rx: tokio::sync::Mutex::new(rx),
-        }
+        let (tx, rx) = tokio::sync::mpsc::channel(N);
+        Self { tx, rx: TokioMutex::new(rx) }
     }
 
-    pub async fn send(&self, val: T) {
-        let _ = self.tx.send(val).await;
+    pub fn sender(&self) -> Sender<T, N> {
+        Sender { s: self.tx.clone() }
+    }
+
+    pub fn receiver(self) -> Receiver<T, N> {
+        Receiver { s: self.rx }
     }
 
     pub async fn recv(&self) -> T {
         self.rx.lock().await.recv().await.unwrap()
+    }
+
+    pub async fn send(&self, msg: T) {
+        self.tx.send(msg).await.unwrap();
     }
 }
 

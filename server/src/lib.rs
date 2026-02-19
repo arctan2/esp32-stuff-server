@@ -17,6 +17,7 @@ use internal_prelude::*;
 use alloc::format;
 
 pub mod file_uploader;
+pub mod chunks;
 
 use alpa::embedded_sdmmc_fs::{DbDirSdmmc, VM};
 use alpa::db::Database;
@@ -31,7 +32,19 @@ use picoserve::response::Response;
 use allocator_api2::alloc::Allocator;
 use allocator_api2::vec::Vec;
 use picoserve::response::chunked::{ChunksWritten, ChunkedResponse, ChunkWriter, Chunks};
-use file_manager::{FMan, BlkDev, ExtAlloc, get_file_manager, FManError, FileType, CardState, consts, AsyncRootFn};
+use file_manager::{
+    FMan,
+    BlkDev,
+    ExtAlloc,
+    get_file_manager,
+    FManError,
+    FileType,
+    CardState,
+    consts,
+    AsyncRootFn,
+    DummyTimesource,
+    FsBlockDevice
+};
 
 #[cfg(feature = "embassy-mode")]
 use esp_println::println;
@@ -178,16 +191,14 @@ struct HandleFilesAsync<W: picoserve::io::Write> {
     chunk_writer: ChunkWriter<W>,
 }
 
-impl<W, D, T> AsyncRootFn<D, T, Result<ChunksWritten, W::Error>> for HandleFilesAsync<W>
-where 
-    W: picoserve::io::Write,
-    D: BlockDevice,
-    T: TimeSource,
+impl<W> AsyncRootFn<Result<ChunksWritten, W::Error>> for HandleFilesAsync<W>
+where W: picoserve::io::Write,
 {
-    type Fut<'a> = impl core::future::Future<Output = Result<Result<ChunksWritten, W::Error>, FManError<D::Error>>>
-                    + 'a where Self: 'a, D: 'a, T: 'a;
+    type Fut<'a> = impl core::future::Future<
+        Output = Result<Result<ChunksWritten, W::Error>, FManError<<FsBlockDevice as BlockDevice>::Error>>>
+        + 'a where Self: 'a;
 
-    fn call<'a>(mut self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+    fn call<'a>(mut self, root_dir: RawDirectory, vm: &'a VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) -> Self::Fut<'a> {
         async move {
             let root_dir = root_dir.to_directory(vm);
             let allocator = ExtAlloc::default();
@@ -451,14 +462,11 @@ struct DeleteFileAsync {
     name: String
 }
 
-impl<D, T> AsyncRootFn<D, T, &'static str> for DeleteFileAsync
-where 
-    D: BlockDevice,
-    T: TimeSource,
-{
-    type Fut<'a> = impl core::future::Future<Output = Result<&'static str, FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
+impl AsyncRootFn<&'static str> for DeleteFileAsync {
+    type Fut<'a> = impl core::future::Future<
+        Output = Result<&'static str, FManError<<FsBlockDevice as BlockDevice>::Error>>> + 'a where Self: 'a;
 
-    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) -> Self::Fut<'a> {
         async move {
             let root_dir = root_dir.to_directory(vm);
             let allocator = ExtAlloc::default();
@@ -495,14 +503,11 @@ pub async fn handle_delete_file(name: String) -> impl IntoResponse {
 
 struct DeleteDbAsync;
 
-impl<D, T> AsyncRootFn<D, T, &'static str> for DeleteDbAsync
-where 
-    D: BlockDevice,
-    T: TimeSource,
-{
-    type Fut<'a> = impl core::future::Future<Output = Result<&'static str, FManError<D::Error>>> + 'a where Self: 'a, D: 'a, T: 'a;
+impl AsyncRootFn<&'static str> for DeleteDbAsync {
+    type Fut<'a> = impl core::future::Future<
+        Output = Result<&'static str, FManError<<FsBlockDevice as BlockDevice>::Error>>> + 'a where Self: 'a;
 
-    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a> {
+    fn call<'a>(self, root_dir: RawDirectory, vm: &'a VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) -> Self::Fut<'a> {
         async move {
             let root_dir = root_dir.to_directory(vm);
             let db_dir = root_dir.open_dir(consts::DB_DIR).map_err(FManError::SdErr)?;

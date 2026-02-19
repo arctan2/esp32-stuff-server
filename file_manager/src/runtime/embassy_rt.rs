@@ -5,9 +5,39 @@ use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::signal::Signal as EmbassySignal;
 use embassy_sync::channel::Channel as EmbassyChannel;
 use embassy_sync::mutex::{Mutex as EmbassyMutex, MutexGuard as EmbassyMutexGuard};
+use embassy_sync::channel::Receiver as EmbassyReceiver;
+use embassy_sync::channel::Sender as EmbassySender;
 
 pub struct Channel<T, const N: usize> {
     ch: EmbassyChannel<CriticalSectionRawMutex, T, N>,
+}
+
+#[derive(Clone)]
+pub struct Sender<T, const N: usize> {
+    s: EmbassySender<CriticalSectionRawMutex, T, N>
+}
+
+impl <T, const N: usize> Clone for Sender<T, N> {
+    fn clone(&self) -> Self {
+        Self { s: self.s.clone() }
+    }
+}
+
+impl<T, const N: usize> Sender<T, N> {
+    pub async fn send(&self, msg: T) {
+        self.s.send(msg).await;
+    }
+}
+
+#[derive(Debug)]
+pub struct Receiver<T, const N: usize> {
+    s: EmbassyReceiver<CriticalSectionRawMutex, T, N>
+}
+
+impl<T, const N: usize> Receiver<T, N> {
+    pub async fn recv(&mut self) -> T {
+        self.s.receive().await
+    }
 }
 
 impl<T, const N: usize> Channel<T, N> {
@@ -15,12 +45,20 @@ impl<T, const N: usize> Channel<T, N> {
         Self { ch: EmbassyChannel::new() }
     }
 
-    pub async fn send(&self, val: T) {
-        self.ch.send(val).await
+    pub fn sender(&self) -> Sender<T, N> {
+        Sender { s: self.ch.sender() }
     }
 
-    pub async fn recv(&self) -> T {
+    pub fn receiver(&self) -> Receiver<T, N> {
+        Receiver { s: self.ch.receiver() }
+    }
+
+    pub async fn recv(&mut self) -> T {
         self.ch.receive().await
+    }
+
+    pub async fn send(&self, msg: T) {
+        self.ch.send(msg).await
     }
 }
 

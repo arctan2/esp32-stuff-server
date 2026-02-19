@@ -36,6 +36,9 @@ async fn main() {
                 }
             }
 
+            server::chunks::init_all().await;
+            tokio::task::spawn_local(server::chunks::task_file_uploader());
+
             loop {
                 let (stream, remote_address) = listener.accept().await.unwrap();
                 

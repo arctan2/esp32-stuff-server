@@ -1,7 +1,7 @@
 #![no_std]
 
 pub mod consts;
-mod runtime;
+pub mod runtime;
 
 use alpa::embedded_sdmmc_fs::{DbDirSdmmc};
 use alpa::db::Database;
@@ -58,34 +58,19 @@ pub enum FileType {
 }
 
 #[derive(Debug)]
-pub enum CardState<
-    D: BlockDevice, T: TimeSource,
-    const MD: usize,
-    const MF: usize,
-    const MV: usize
-> {
-    NoCard { device: D, timer: T },
-    Active { vm: VolumeManager<D, T, 4, 4, 1>, vol: RawVolume },
+pub enum CardState {
+    NoCard { device: BlkDev, timer: DummyTimesource },
+    Active { vm: VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>, vol: RawVolume },
     Processing
 }
 
 #[derive(Debug)]
-pub struct FileManagerState<
-    D: BlockDevice, T: TimeSource,
-    const MD: usize,
-    const MF: usize,
-    const MV: usize
-> {
-    pub card_state: CardState<D, T, MD, MF, MV>
+pub struct FileManagerState {
+    pub card_state: CardState
 }
 
-impl <
-    D: BlockDevice, T: TimeSource,
-    const MD: usize,
-    const MF: usize,
-    const MV: usize
-> FileManagerState<D, T, MD, MF, MV> {
-    pub fn new(block_device: D, time_src: T) -> Self {
+impl FileManagerState {
+    pub fn new(block_device: BlkDev, time_src: DummyTimesource) -> Self {
         Self {
             card_state: CardState::NoCard{ device: block_device, timer: time_src }
         }
@@ -113,13 +98,8 @@ impl <
 }
 
 #[derive(Debug)]
-pub struct FileManager<
-    D: BlockDevice, T: TimeSource,
-    const MD: usize,
-    const MF: usize,
-    const MV: usize
-> {
-    pub state: Mutex<FileManagerState<D, T, MD, MF, MV>>,
+pub struct FileManager {
+    pub state: Mutex<FileManagerState>,
 }
 
 #[derive(Debug)]
@@ -149,23 +129,14 @@ impl<E: core::fmt::Debug> From<&'static str> for FManError<E> {
     }
 }
 
-pub trait AsyncRootFn<D, T, R> 
-where 
-    D: embedded_sdmmc::BlockDevice, 
-    T: embedded_sdmmc::TimeSource 
-{
-    type Fut<'a>: core::future::Future<Output = Result<R, FManError<D::Error>>> + 'a 
-    where Self: 'a, D: 'a, T: 'a;
-    fn call<'a>(self, dir: RawDirectory, vm: &'a VolumeManager<D, T, 4, 4, 1>) -> Self::Fut<'a>;
+pub trait AsyncRootFn<R> {
+    type Fut<'a>: core::future::Future<Output = Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>> + 'a 
+    where Self: 'a;
+    fn call<'a>(self, dir: RawDirectory, vm: &'a VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>) -> Self::Fut<'a>;
 }
 
-impl <
-    D: BlockDevice, T: TimeSource,
-    const MD: usize,
-    const MF: usize,
-    const MV: usize
-> FileManager<D, T, MD, MF, MV> {
-    pub fn new(block_device: D, time_src: T) -> Self {
+impl FileManager {
+    pub fn new(block_device: BlkDev, time_src: DummyTimesource) -> Self {
         let mut state = FileManagerState::new(block_device, time_src);
         state.try_mount();
         Self {
@@ -198,7 +169,9 @@ impl <
         }
     }
 
-    pub async fn open_dir<'a>(&self, dir: Option<RawDirectory>, name: &'a str) -> Result<RawDirectory, FManError<D::Error>> {
+    pub async fn open_dir<'a>(&self, dir: Option<RawDirectory>, name: &'a str)
+        -> Result<RawDirectory, FManError<<FsBlockDevice as BlockDevice>::Error>>
+    {
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
@@ -217,7 +190,9 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn close_dir<'a>(&self, dir: RawDirectory) -> Result<(), FManError<D::Error>> {
+    pub async fn close_dir<'a>(&self, dir: RawDirectory)
+        -> Result<(), FManError<<FsBlockDevice as BlockDevice>::Error>>
+    {
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, vol: _ } = state.card_state {
@@ -226,11 +201,13 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub fn root_dir(vm: &VolumeManager<D, T, 4, 4, 1>, vol: &RawVolume) -> Result<RawDirectory, FManError<D::Error>> {
+    pub fn root_dir(vm: &VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>, vol: &RawVolume)
+        -> Result<RawDirectory, FManError<<FsBlockDevice as BlockDevice>::Error>>
+    {
         Ok(vm.open_root_dir(*vol)?)
     }
 
-    pub async fn root_dir_lock(&self) -> Result<RawDirectory, FManError<D::Error>> {
+    pub async fn root_dir_lock(&self) -> Result<RawDirectory, FManError<<FsBlockDevice as BlockDevice>::Error>> {
         let state = self.state.lock().await;
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
             return Self::root_dir(vm, vol);
@@ -238,9 +215,9 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn with_vol_man<F, R>(&self, f: F) -> Result<R, FManError<D::Error>>
+    pub async fn with_vol_man<F, R>(&self, f: F) -> Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>
     where
-        F: FnOnce(&VolumeManager<D, T, 4, 4, 1>, &RawVolume) -> Result<R, FManError<D::Error>>,
+        F: FnOnce(&VolumeManager<BlkDev, DummyTimesource, 4, 4, 1>, &RawVolume) -> Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>,
     {
         let state = self.state.lock().await;
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
@@ -249,9 +226,9 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn with_root_dir<F, R>(&self, f: F) -> Result<R, FManError<D::Error>>
+    pub async fn with_root_dir<F, R>(&self, f: F) -> Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>
     where
-        F: FnOnce(RawDirectory) -> Result<R, FManError<D::Error>>,
+        F: FnOnce(RawDirectory) -> Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>,
     {
         let state = self.state.lock().await;
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
@@ -260,9 +237,9 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn with_root_dir_async<F, R>(&self, f: F) -> Result<R, FManError<D::Error>>
+    pub async fn with_root_dir_async<F, R>(&self, f: F) -> Result<R, FManError<<FsBlockDevice as BlockDevice>::Error>>
     where
-        F: AsyncRootFn<D, T, R>,
+        F: AsyncRootFn<R>,
     {
         let state = self.state.lock().await;
         if let CardState::Active { ref vm, ref vol } = state.card_state {
@@ -272,7 +249,7 @@ impl <
         Err(FManError::CardNotActive)
     }
 
-    pub async fn resolve_path_iter<'a>(&self, path: &'a str) -> Result<FileType, FManError<D::Error>> {
+    pub async fn resolve_path_iter<'a>(&self, path: &'a str) -> Result<FileType, FManError<<FsBlockDevice as BlockDevice>::Error>> {
         let state = self.state.lock().await;
 
         if let CardState::Active{ ref vm, ref vol } = state.card_state {
@@ -320,7 +297,7 @@ impl <
 
             let last_name = prev_name.unwrap();
 
-            let mut ret: Result<FileType, FManError<D::Error>> = Err(FManError::SdErr(Error::NotFound));
+            let mut ret: Result<FileType, FManError<<FsBlockDevice as BlockDevice>::Error>> = Err(FManError::SdErr(Error::NotFound));
 
             if let None = names.peek() {
                 ret = match vm.find_directory_entry(cur_dir, last_name) {

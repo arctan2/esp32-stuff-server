@@ -1775,11 +1775,14 @@ version = "0.1.0"
 dependencies = [
  "allocator-api2",
  "alpa",
+ "embassy-executor",
+ "embassy-futures",
  "embedded-sdmmc",
  "esp-alloc",
  "esp-println",
  "file_manager",
  "picoserve",
+ "tokio",
 ]
 
 [[package]]
